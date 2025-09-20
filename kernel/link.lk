@@ -1,0 +1,14 @@
+# link.lk (수정된 최종 버전)
+
+# 출력 파일 이름
+NAME kernel.bin
+
+# 16비트 COM 파일 형식
+FORMAT RAW BIN
+# 옵션
+OPTION NODEFAULTLIBS
+OPTION START=_start
+# ★★★ 파일 순서 지정 (매우 중요) ★★★
+FILE kernel_entry.obj   # 1. 어셈블리 진입점 파일이 가장 먼저 와야 함
+FILE kernel.obj         # 2. 그 다음에 C 코드 파일
+FILE api.obj

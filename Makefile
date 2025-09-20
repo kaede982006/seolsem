@@ -1,12 +1,11 @@
 .PHONY: all
-all: seolsem.img
+all: seolsem.qcow2
 
 .PHONY: clean
 clean: 
-	rm -f seolsem.img *.bin
-
-seolsem.img: boot.bin kernel.bin
-	cat $^ > $@
-
-%.bin: %.asm
-	nasm -f bin -o $@ $<
+	rm seolsem.qcow2
+seolsem.qcow2: seolsem.img
+	qemu-img create -f qcow2 seolsem.qcow2 64K
+	qemu-img convert -O qcow2 seolsem.img seolsem.qcow2
+seolsem.img: bootloader/bootloader.img kernel/kernel.img
+	cat $^ > seolsem.img

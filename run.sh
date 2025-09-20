@@ -1,3 +1,10 @@
 #!/bin/bash
+cd bootloader
+make
+cd ..
+cd kernel
+make
+cd ..
 
-qemu-system-i386 -fda seolsem.img
+cat bootloader/bootloader.img kernel/kernel.img > seolsem.img
+qemu-system-i386 -hda seolsem.img
