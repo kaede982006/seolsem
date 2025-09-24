@@ -29,7 +29,7 @@ start:
     mov word [line], 0
 
 	mov ax, 0x02
-	mov bx, 0x01
+	mov bx, 0x02
 	mov cx, 0x1000
 	push ax
 	push bx

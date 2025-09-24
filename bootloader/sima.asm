@@ -16,13 +16,13 @@ start:
 	
 	mov ax, cs
 	mov ds, ax
-
-    call clear_screen
 	
-	mov ax, 0x03
-	mov bx, 0x01
+	call enable_a20
+	jc a20_support_error
+load_kernel:
+	mov ax, 0x04
+	mov bx, 0x02
 	mov cx, 0x1080
-
 	push ax
 	push bx
 	push cx
@@ -34,7 +34,13 @@ start:
 	
 system_halt:
     jmp $
-
+a20_support_error:
+	push a20_err_message
+	call print_message
+	jmp $
+	
 %include "read.asm"
+%include "a20.asm"
 
-times 512-($-$$) db 0x00
+a20_err_message: db "Turning on A20 failed: System Halted"
+times 1024-($-$$) db 0x00
