@@ -1,30 +1,22 @@
 #include "simaio.h"
+#include "sima_type.h"
+#include "sima_mem.h"
+
+static char current_path[256];
 
 void kernel_main() {
-	print_message("Hello World! 1");
-	print_message("Hello World! 2");
-	print_message("Hello World! 3");
-	print_message("Hello World! 4");
-	print_message("Hello World! 5");
-	print_message("Hello World! 6");
-	print_message("Hello World! 7");
-	print_message("Hello World! 8");
-	print_message("Hello World! 9");
-	print_message("Hello World! 10");
-	print_message("Hello World! 11");
-	print_message("Hello World! 12");
-	print_message("Hello World! 13");
-	print_message("Hello World! 14");
-	print_message("Hello World! 15");
-	print_message("Hello World! 16");
-	print_message("Hello World! 17");
-	print_message("Hello World! 18");
-	print_message("Hello World! 19");
-	print_message("Hello World! 20");
-	print_message("Hello World! 21");
-	print_message("Hello World! 22");
-	print_message("Hello World! 23");
-	print_message("Hello World! 24");
-	print_message("Hello World! 25");
-	print_message("Hello World! 26");
+	BOOL ok = memcl(current_path, (UINT16)sizeof(current_path));
+	if (!ok) {
+		print_message("Unable to Initialize Local Path");
+		while (1) { }
+	}
+
+	ok = sima_strcpy(current_path, (UINT16)sizeof(current_path), "[drive0]:# $ ");
+	if (!ok) {
+		print_message("Path buffer too small");
+		while (1) { }
+	}
+	while (1) {
+		wait_prompt(current_path);
+	}
 }

@@ -12,3 +12,4 @@ OPTION START=_start
 FILE kernel_entry.obj   # 1. 어셈블리 진입점 파일이 가장 먼저 와야 함
 FILE kernel.obj         # 2. 그 다음에 C 코드 파일
 FILE api.obj
+FILE sima_mem.obj
