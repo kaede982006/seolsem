@@ -24,7 +24,7 @@ LDFILE  := link.lk
 # ------------------------------
 # Sources
 # ------------------------------
-SRCS_C     := kernel.c sima_mem.c
+SRCS_C     := kernel.c sima_mem.c commands.c
 SRCS_ASM   := api.asm kernel_entry.asm
 
 # ------------------------------
@@ -77,7 +77,7 @@ $(OBJDIR)/%.obj: %.asm | $(OBJDIR)
 # Headers (간단 수동 의존성—필요시 추가)
 # ------------------------------
 # C 파일별 직접 의존(예: 타입/프로토타입 헤더)
-$(OBJDIR)/kernel.obj:     simaio.h sima_type.h sima_mem.h
+$(OBJDIR)/kernel.obj:     sima_io.h sima_type.h sima_mem.h
 $(OBJDIR)/sima_mem.obj:   sima_type.h sima_mem.h
 
 # ------------------------------

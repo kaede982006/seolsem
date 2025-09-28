@@ -1,6 +1,8 @@
 %ifndef __API__
 %define __API__
 
+segment _TEXT class=CODE use16
+
 global _clear_screen
 global _print_message
 global _wait_prompt
@@ -61,14 +63,13 @@ _wait_prompt:
     jmp  .print_loop
 
 .start_poll:
-    ; 메시지 출력 끝난 후
-    mov  bx, di              ; bx = 입력 시작 커서
+    mov  bx, di
     mov  dx, [di_pos]
-    add  dx, 160             ; dx = 현재 줄의 끝(한 칸 past-end)
+    add  dx, 160
 
-	mov si, [bp+6]     ; SI = buf (사용자가 입력할 내용을 저장할 위치)
-	mov cx, si         ; CX = buf 시작(백스페이스 하한)
-
+    mov  si, [bp+6]         ; buf
+    mov  cx, si
+    mov  byte [si], 0       ; ★ 버퍼 시작을 항상 NUL로
 .poll:
 .wait_key:
     mov  ah, 01h
@@ -155,8 +156,7 @@ _print_message:
     jb   .line_ok
     call scroll_screen
     ; 스크롤이 DS를 건드리므로, 다시 DS=CS 세팅
-    mov  ax, cs
-    mov  ds, ax
+
     mov  word [line], 24
 .line_ok:
 
@@ -215,7 +215,9 @@ scroll_screen:
     popa
     ret
 
-line: dw 0
-di_pos: dw 0               ; 현재 출력 위치(di)를 저장할 변수
+; 맨 아래에
+segment _DATA class=DATA use16
+line   dw 0
+di_pos dw 0
 
 %endif

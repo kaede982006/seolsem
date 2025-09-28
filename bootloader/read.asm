@@ -5,9 +5,9 @@ load_img:
 	push bp
 	mov bp, sp
 
-	mov ax, word [ebp+8]
+	mov ax, word [bp+8]
 	mov byte [sector_number], al
-	mov bx, word [ebp+6]
+	mov bx, word [bp+6]
 	mov word [total_sector_count], bx
 reset_disk:
     mov ax, 0
@@ -26,7 +26,7 @@ reset_disk:
     and al, 0x3f  ; 하위 6비트만 남겨서 순수한 섹터 수를 얻음
     mov byte [disk_sector_per_track], al
 
-    mov si, word [ebp+4]
+    mov si, word [bp+4]
     ; <-- 수정된 부분: 루프 시작 전 ES를 목적지 메모리 세그먼트로 설정
     mov es, si
     mov bx, 0x0000
