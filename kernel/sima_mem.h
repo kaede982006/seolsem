@@ -16,6 +16,6 @@ STRC		sima_strncmp(const char *a, const char *b, UINT16 n);
 const char*	sima_strchr(const char *s, char ch);
 const char*	sima_strstr(const char *s, const char *pat);
 UINT16		sima_strlen(const char *s);
-UINT16		sima_strcspl(char *s, char ch, char *outv[], UINT16 max_out);
+UINT16		sima_strcspl(char *s, char ch, char **outv, UINT16 max_out);
 
 #endif

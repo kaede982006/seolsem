@@ -1,3 +1,0 @@
-commands.c(12): Warning! W100: Parameter 3 contains inconsistent levels of indirection
-commands.c(12): Note! I2003: source conversion type is 'char **'
-commands.c(12): Note! I2004: target conversion type is 'char **[]'

@@ -194,7 +194,7 @@ const char* sima_strstr(const char *s, const char *pat) {
     }
     return (const char*)0;
 }
-UINT16 sima_strcspl(char *s, char ch, char *outv[], UINT16 max_out) {
+UINT16 sima_strcspl(char *s, char ch, char **outv, UINT16 max_out) {
     UINT16 n;
     char *p;
 	if (!s || !outv || max_out == 0) {
@@ -211,6 +211,7 @@ UINT16 sima_strcspl(char *s, char ch, char *outv[], UINT16 max_out) {
         *p++ = '\0';                            /* in-place 종결 */
         while (*p == ch) ++p;                   /* 연속 구분자 스킵 */
     }
+    
     return n;
 }
 
