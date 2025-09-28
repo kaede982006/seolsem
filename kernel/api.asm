@@ -66,15 +66,27 @@ _wait_prompt:
     mov  dx, [di_pos]
     add  dx, 160             ; dx = 현재 줄의 끝(한 칸 past-end)
 
+	mov si, [bp+6]     ; SI = buf (사용자가 입력할 내용을 저장할 위치)
+	mov cx, si         ; CX = buf 시작(백스페이스 하한)
+
 .poll:
 .wait_key:
     mov  ah, 01h
-    int  16h
+	push si
+    push di
+    int  16h                ; AL=ASCII, AH=scancode
+    pop  di
+    pop  si
+
     jz   .wait_key
 
     xor  ah, ah
-    int  16h                 ; AL=ASCII, AH=scancode
-
+	push si
+    push di
+    int  16h                ; AL=ASCII, AH=scancode
+    pop  di
+    pop  si
+	
     ; 1) 엔터면 줄 종료
     cmp  al, 13
     je   .end_line
@@ -95,6 +107,12 @@ _wait_prompt:
     mov  [es:di], al
     mov  byte [es:di+1], 0x07
     add  di, 2
+
+	; 일반 문자 입력
+	mov  [si], al      ; 버퍼에 기록
+	inc  si
+	mov  byte [si], 0  ; 널 유지
+
     jmp  .poll
 
 .backspace:
@@ -104,7 +122,13 @@ _wait_prompt:
     sub  di, 2
     mov  byte [es:di], 0x20      ; 화면에서 지울 땐 공백(0x20)이 자연스러움
     mov  byte [es:di+1], 0x07
-    jmp  .poll
+
+	; 백스페이스
+	cmp  si, cx        ; buf 시작 이전은 금지
+	jbe  .poll
+	dec  si
+	mov  byte [si], 0
+	jmp  .poll
 
 .end_line:
     inc  word [line]

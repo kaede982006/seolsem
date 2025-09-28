@@ -2,5 +2,5 @@
 #define __SIMAIO__
 
 extern void print_message(const char* str);
-extern void wait_prompt(const char* str);
+extern void wait_prompt(const char* str, char* buffer);
 #endif

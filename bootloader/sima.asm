@@ -21,7 +21,7 @@ start:
 	jc a20_support_error
 load_kernel:
 	mov ax, 0x04
-	mov bx, 0x02
+	mov bx, KRN_SECT
 	mov cx, 0x1080
 	push ax
 	push bx
