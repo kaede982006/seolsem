@@ -25,7 +25,7 @@ LDFILE  := link.lk
 # Sources
 # ------------------------------
 SRCS_C     := kernel.c sima_mem.c commands.c
-SRCS_ASM   := api.asm kernel_entry.asm
+SRCS_ASM   := api.asm kernel_entry.asm sima_heap.asm
 
 # ------------------------------
 # Objects (빌드 디렉터리에 모아서 생성)

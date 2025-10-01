@@ -8,6 +8,7 @@ file build/obj/kernel_entry.obj
 file build/obj/kernel.obj
 file build/obj/api.obj
 file build/obj/sima_mem.obj
+file build/obj/sima_heap.obj
 file build/obj/commands.obj
 
 name build/bin/kernel.img
