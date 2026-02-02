@@ -88,20 +88,32 @@ _wait_prompt:
 .poll:
 .wait_key:
     mov  ah, 01h
-	push si
+    push bx
+    push cx
+    push dx
+    push si
     push di
     int  16h                ; AL=ASCII, AH=scancode
     pop  di
     pop  si
+    pop  dx
+    pop  cx
+    pop  bx
 
     jz   .wait_key
 
     xor  ah, ah
-	push si
+    push bx
+    push cx
+    push dx
+    push si
     push di
     int  16h                ; AL=ASCII, AH=scancode
     pop  di
     pop  si
+    pop  dx
+    pop  cx
+    pop  bx
 	
     ; 1) 엔터면 줄 종료
     cmp  al, 13
