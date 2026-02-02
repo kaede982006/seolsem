@@ -56,6 +56,10 @@ $(IMG): $(BINS) | $(BINDIR)
 $(BINDIR):
 	@mkdir -p "$@"
 
+# ensure kernel image exists when building bootloader directly
+$(KERNEL_IMG):
+	@$(MAKE) -C ../kernel
+
 # ---------------------------------
 # Housekeeping
 # ---------------------------------
