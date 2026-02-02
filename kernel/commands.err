@@ -1,0 +1,9 @@
+commands.c(312): Error! E1058: Cannot use typedef 'UINT16' as a variable
+commands.c(312): Error! E1009: Expecting ';' but found 'key'
+commands.c(312): Error! E1011: Symbol 'key' has not been declared
+commands.c(313): Error! E1058: Cannot use typedef 'UINT8' as a variable
+commands.c(313): Error! E1009: Expecting ';' but found 'ascii'
+commands.c(313): Error! E1011: Symbol 'ascii' has not been declared
+commands.c(314): Error! E1058: Cannot use typedef 'UINT8' as a variable
+commands.c(314): Error! E1009: Expecting ';' but found 'scan'
+commands.c(314): Error! E1011: Symbol 'scan' has not been declared

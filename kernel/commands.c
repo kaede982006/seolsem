@@ -308,10 +308,14 @@ static BOOL run_edit(const char *name) {
                     "Ctrl+S Save  Esc Save&Exit  Ctrl+Q Quit  Arrows Move");
 
         for (;;) {
+            UINT16 key;
+            UINT8 ascii;
+            UINT8 scan;
+
             editor_render(name, buffer, size, cursor, &scroll_row, modified, status);
-            UINT16 key = read_key();
-            UINT8 ascii = (UINT8)(key & 0xFF);
-            UINT8 scan = (UINT8)((key >> 8) & 0xFF);
+            key = read_key();
+            ascii = (UINT8)(key & 0xFF);
+            scan = (UINT8)((key >> 8) & 0xFF);
 
             if (ascii == KEY_ESC) {
                 if (!fs_write(name, (const UINT8*)buffer, size)) {
