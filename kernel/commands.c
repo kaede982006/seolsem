@@ -123,10 +123,6 @@ static void editor_render(const char *name, const char *buffer, UINT16 size, UIN
     UINT16 i;
     UINT16 render_cursor = cursor;
 
-    if (size >= EDIT_MAX_SIZE && cursor == size && size > 0) {
-        render_cursor = (UINT16)(size - 1);
-    }
-
     editor_index_to_pos(buffer, size, render_cursor, &doc_row, &doc_col);
     if (doc_row < *scroll_row) {
         *scroll_row = doc_row;

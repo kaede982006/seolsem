@@ -3,6 +3,8 @@
 
 segment _TEXT class=CODE use16
 
+%define INPUT_MAX 64
+
 global _clear_screen
 global _print_message
 global _wait_prompt
@@ -69,6 +71,8 @@ _wait_prompt:
 
 .start_poll:
     mov  bx, di
+    mov  ax, [line]
+    mov  [line_start], ax
     mov  dx, [di_pos]
     add  dx, 160
     mov  [line_end], dx
@@ -78,17 +82,10 @@ _wait_prompt:
     mov  byte [si], 0       ; ★ 버퍼 시작을 항상 NUL로
 .update_cursor:
     mov  ax, di
-    cmp  ax, [line_end]
-    jne  .cursor_calc
-    sub  ax, 2
-.cursor_calc:
-    xor  dx, dx
-    mov  bx, 160
-    div  bx                 ; AX=ROW, DX=OFFSET
-    mov  dh, al
-    mov  ax, dx
+    sub  ax, [di_pos]
     shr  ax, 1
     mov  dl, al
+    mov  dh, [line]
     call set_cursor_hw
 .poll:
 .wait_key:
@@ -132,9 +129,10 @@ _wait_prompt:
     test al, al
     jz   .poll
 
-    ; 4) 줄 끝이면 더 못 씀 (경계 = di_pos+160)
-    mov  dx, [line_end]
-    cmp  di, dx
+    ; 4) 최대 입력 길이 제한
+    mov  ax, si
+    sub  ax, cx
+    cmp  ax, INPUT_MAX
     jae  .poll
 
     ; 5) 일반 문자 출력
@@ -143,17 +141,52 @@ _wait_prompt:
     add  di, 2
 
 	; 일반 문자 입력
-	mov  [si], al      ; 버퍼에 기록
-	inc  si
-	mov  byte [si], 0  ; 널 유지
+    mov  [si], al      ; 버퍼에 기록
+    inc  si
+    mov  byte [si], 0  ; 널 유지
 
+    ; 줄 끝에 도달하면 다음 줄로 이동 (입력 래핑)
+    cmp  di, [line_end]
+    jb   .update_cursor
+    inc  word [line]
+    cmp  word [line], 25
+    jb   .wrap_set_pos
+    call scroll_screen
+    mov  word [line], 24
+.wrap_set_pos:
+    mov  ax, [line]
+    mov  bx, 160
+    mul  bx
+    mov  [di_pos], ax
+    mov  di, ax
+    mov  dx, ax
+    add  dx, 160
+    mov  [line_end], dx
     jmp  .update_cursor
 
 .backspace:
     ; di가 입력 시작 이전/같으면 지우지 않음
     cmp  di, bx
+    jne  .backspace_ok
+    cmp  word [line], [line_start]
     jbe  .poll
+.backspace_ok:
+    cmp  di, [di_pos]
+    jne  .backspace_same_line
+    dec  word [line]
+    mov  ax, [line]
+    mov  bx, 160
+    mul  bx
+    mov  [di_pos], ax
+    mov  di, ax
+    mov  dx, ax
+    add  dx, 160
+    mov  [line_end], dx
+    add  di, 158
+    jmp  .backspace_clear
+.backspace_same_line:
     sub  di, 2
+.backspace_clear:
     mov  byte [es:di], 0x20      ; 화면에서 지울 땐 공백(0x20)이 자연스러움
     mov  byte [es:di+1], 0x07
 
@@ -165,16 +198,8 @@ _wait_prompt:
 	jmp  .update_cursor
 
 .end_line:
-    mov  ax, di
-    xor  dx, dx
-    mov  bx, 160
-    div  bx                 ; AX = row, DX = offset
-    cmp  di, [line_end]
-    je   .set_next_line
-    inc  ax
-.set_next_line:
-    mov  [line], ax
-    cmp  ax, 25
+    inc  word [line]
+    cmp  word [line], 25
     jb   .set_prompt_cursor
     call scroll_screen
     mov  word [line], 24
@@ -366,27 +391,9 @@ set_cursor_hw:
     push bx
     push dx
 
-    mov  al, dh
-    xor  ah, ah
-    mov  bl, 80
-    mul  bl                 ; AX = row * 80
-    mov  bl, dl
-    xor  bh, bh
-    add  ax, bx             ; AX = row * 80 + col
-    mov  bx, ax
-
-    mov  dx, 0x3D4
-    mov  al, 0x0F
-    out  dx, al
-    mov  dx, 0x3D5
-    mov  al, bl
-    out  dx, al
-    mov  dx, 0x3D4
-    mov  al, 0x0E
-    out  dx, al
-    mov  dx, 0x3D5
-    mov  al, bh
-    out  dx, al
+    mov  ah, 0x02            ; BIOS: set cursor position
+    mov  bh, 0x00            ; page 0
+    int  0x10
 
     pop  dx
     pop  bx
@@ -398,5 +405,6 @@ segment _DATA class=DATA use16
 line   dw 0
 di_pos dw 0
 line_end dw 0
+line_start dw 0
 
 %endif
