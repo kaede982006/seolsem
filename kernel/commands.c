@@ -4,6 +4,7 @@
 #include "sima_mem.h"
 #include "sima_io.h"
 #include "sima_program.h"
+#include "sima_env.h"
 
 static char wrong_command_message[256];
 static char message_buffer[256];
@@ -221,6 +222,26 @@ static BOOL run_cls(void) {
     return TRUE;
 }
 
+static BOOL load_program_with_path(const char *name) {
+    const char *path;
+    char path_buffer[64];
+    char *dirs[8];
+    UINT16 count;
+    UINT16 i;
+
+    if (program_load(name)) return TRUE;
+    path = env_get("PATH");
+    if (!path) return FALSE;
+    if (!sima_strcpy(path_buffer, (UINT16)sizeof(path_buffer), path)) {
+        return FALSE;
+    }
+    count = sima_strcspl(path_buffer, ';', dirs, (UINT16)8);
+    for (i = 0; i < count; ++i) {
+        if (program_load_in_dir(dirs[i], name)) return TRUE;
+    }
+    return FALSE;
+}
+
 void run_help() {
     print_message("Available commands:");
     print_message("  ver             - Show OS version");
@@ -231,6 +252,7 @@ void run_help() {
     print_message("  write <file> <data> - Write text to file");
     print_message("  edit <file>     - Open memo editor");
     print_message("  rm <file>       - Delete file");
+    print_message("  mkdir <dir>     - Create directory");
     print_message("  load <file>     - Load program to memory");
     print_message("  run             - Run loaded program");
     print_message("  exec <file>     - Load and run program");
@@ -245,6 +267,8 @@ static BOOL run_ls(void) {
     for (i = 0; i < FS_MAX_FILES; ++i) {
         if (!fs_get_entry(i, &entry)) continue;
         if (!entry.used) continue;
+        if (i == FS_ROOT_INDEX) continue;
+        if (entry.parent != FS_ROOT_INDEX) continue;
 
         sima_memclr(message_buffer, (UINT16)sizeof(message_buffer));
         sima_strcpy(message_buffer, (UINT16)sizeof(message_buffer), entry.name);
@@ -252,8 +276,12 @@ static BOOL run_ls(void) {
         sima_utoa(entry.size, size_buffer, (UINT16)sizeof(size_buffer), 10);
         sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), size_buffer);
         sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), " bytes ");
-        sima_strcat(message_buffer, (UINT16)sizeof(message_buffer),
-                    entry.executable ? "[EXEC]" : "[DATA]");
+        if (entry.is_dir) {
+            sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), "[DIR]");
+        } else {
+            sima_strcat(message_buffer, (UINT16)sizeof(message_buffer),
+                        entry.executable ? "[EXEC]" : "[DATA]");
+        }
         print_message(message_buffer);
     }
     return TRUE;
@@ -420,9 +448,19 @@ static BOOL run_rm(const char *name) {
     return TRUE;
 }
 
+static BOOL run_mkdir(const char *name) {
+    if (!name) return FALSE;
+    if (!fs_create_dir(name)) {
+        print_simple("Unable to create directory.");
+        return TRUE;
+    }
+    print_simple("Directory created.");
+    return TRUE;
+}
+
 static BOOL run_load(const char *name) {
     if (!name) return FALSE;
-    if (!program_load(name)) {
+    if (!load_program_with_path(name)) {
         print_simple("Unable to load program.");
         return TRUE;
     }
@@ -439,7 +477,7 @@ static BOOL run_program(void) {
 }
 
 static BOOL run_exec(const char *name) {
-    if (!program_load(name)) {
+    if (!load_program_with_path(name)) {
         print_simple("Unable to load program.");
         return TRUE;
     }
@@ -501,6 +539,9 @@ BOOL run_buffer(char *buffer)
     if (sima_strcmp(argv[0], "rm") == STRC_SAME && argc == 2) {
         return run_rm(argv[1]);
     }
+    if (sima_strcmp(argv[0], "mkdir") == STRC_SAME && argc == 2) {
+        return run_mkdir(argv[1]);
+    }
     if (sima_strcmp(argv[0], "load") == STRC_SAME && argc == 2) {
         return run_load(argv[1]);
     }
@@ -520,6 +561,7 @@ BOOL run_buffer(char *buffer)
         sima_strcmp(argv[0], "write") == STRC_SAME ||
         sima_strcmp(argv[0], "edit") == STRC_SAME ||
         sima_strcmp(argv[0], "rm") == STRC_SAME ||
+        sima_strcmp(argv[0], "mkdir") == STRC_SAME ||
         sima_strcmp(argv[0], "load") == STRC_SAME ||
         sima_strcmp(argv[0], "run") == STRC_SAME ||
         sima_strcmp(argv[0], "exec") == STRC_SAME ||
