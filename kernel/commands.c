@@ -268,6 +268,7 @@ static BOOL run_cat(const char *name) {
         return TRUE;
     }
     data[size] = '\0';
+    print_message("");
     print_message((const char*)data);
     return TRUE;
 }

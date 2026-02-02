@@ -75,6 +75,18 @@ _wait_prompt:
     mov  si, [bp+6]         ; buf
     mov  cx, si
     mov  byte [si], 0       ; ★ 버퍼 시작을 항상 NUL로
+.update_cursor:
+    mov  ax, di
+    xor  dx, dx
+    mov  bx, 160
+    div  bx                 ; AX=ROW, DX=OFFSET
+    mov  dh, al
+    mov  ax, dx
+    shr  ax, 1
+    mov  dl, al
+    mov  bh, 0
+    mov  ah, 02h
+    int  10h
 .poll:
 .wait_key:
     mov  ah, 01h
@@ -119,7 +131,7 @@ _wait_prompt:
 	inc  si
 	mov  byte [si], 0  ; 널 유지
 
-    jmp  .poll
+    jmp  .update_cursor
 
 .backspace:
     ; di가 입력 시작 이전/같으면 지우지 않음
@@ -134,7 +146,7 @@ _wait_prompt:
 	jbe  .poll
 	dec  si
 	mov  byte [si], 0
-	jmp  .poll
+	jmp  .update_cursor
 
 .end_line:
     inc  word [line]
@@ -208,6 +220,7 @@ _print_message:
     ; 비디오 세그먼트
     mov  ax, 0xB800
     mov  es, ax
+    mov  bl, 0
 
     ; 줄 검사 및 스크롤
     mov  ax, [line]
@@ -233,13 +246,37 @@ _print_message:
     mov  cl, [si]
     test cl, cl
     jz   .end
+    cmp  cl, 10
+    je   .newline
+    cmp  cl, 13
+    je   .newline
     mov  [es:di], cl
     mov  byte [es:di+1], 0x07
     inc  si
     add  di, 2
+    mov  bl, 0
+    jmp  .print_loop
+.newline:
+    inc  word [line]
+    mov  ax, [line]
+    cmp  ax, 25
+    jb   .newline_ok
+    call scroll_screen
+    mov  word [line], 24
+.newline_ok:
+    mov  ax, [line]
+    mov  bx, 160
+    mul  bx
+    mov  [di_pos], ax
+    mov  di, [di_pos]
+    mov  bl, 1
+    inc  si
     jmp  .print_loop
 .end:
+    cmp  bl, 1
+    je   .done
     inc  word [line]
+.done:
 
     pop  es
     pop  ds
