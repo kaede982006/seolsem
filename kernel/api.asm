@@ -78,6 +78,10 @@ _wait_prompt:
     mov  byte [si], 0       ; ★ 버퍼 시작을 항상 NUL로
 .update_cursor:
     mov  ax, di
+    cmp  ax, [line_end]
+    jne  .cursor_calc
+    sub  ax, 2
+.cursor_calc:
     xor  dx, dx
     mov  bx, 160
     div  bx                 ; AX=ROW, DX=OFFSET
