@@ -71,6 +71,7 @@ _wait_prompt:
     mov  bx, di
     mov  dx, [di_pos]
     add  dx, 160
+    mov  [line_end], dx
 
     mov  si, [bp+6]         ; buf
     mov  cx, si
@@ -128,6 +129,7 @@ _wait_prompt:
     jz   .poll
 
     ; 4) 줄 끝이면 더 못 씀 (경계 = di_pos+160)
+    mov  dx, [line_end]
     cmp  di, dx
     jae  .poll
 
@@ -366,5 +368,6 @@ set_cursor_hw:
 segment _DATA class=DATA use16
 line   dw 0
 di_pos dw 0
+line_end dw 0
 
 %endif
