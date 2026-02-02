@@ -165,8 +165,15 @@ _wait_prompt:
 	jmp  .update_cursor
 
 .end_line:
-    inc  word [line]
-    mov  ax, [line]
+    mov  ax, di
+    xor  dx, dx
+    mov  bx, 160
+    div  bx                 ; AX = row, DX = offset
+    cmp  di, [line_end]
+    je   .set_next_line
+    inc  ax
+.set_next_line:
+    mov  [line], ax
     cmp  ax, 25
     jb   .set_prompt_cursor
     call scroll_screen
