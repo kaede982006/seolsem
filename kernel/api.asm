@@ -173,6 +173,14 @@ _wait_prompt:
     mov  word [line], 24
 .set_prompt_cursor:
     mov  ax, [line]
+    mov  bx, 160
+    mul  bx
+    mov  [di_pos], ax
+    mov  di, ax
+    mov  dx, ax
+    add  dx, 160
+    mov  [line_end], dx
+    mov  ax, [line]
     mov  dh, al
     xor  dl, dl
     call set_cursor_hw
