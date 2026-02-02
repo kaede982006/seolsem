@@ -121,8 +121,13 @@ static void editor_render(const char *name, const char *buffer, UINT16 size, UIN
     UINT16 doc_row;
     UINT16 doc_col;
     UINT16 i;
+    UINT16 render_cursor = cursor;
 
-    editor_index_to_pos(buffer, size, cursor, &doc_row, &doc_col);
+    if (size >= EDIT_MAX_SIZE && cursor == size && size > 0) {
+        render_cursor = (UINT16)(size - 1);
+    }
+
+    editor_index_to_pos(buffer, size, render_cursor, &doc_row, &doc_col);
     if (doc_row < *scroll_row) {
         *scroll_row = doc_row;
     } else if (doc_row >= (UINT16)(*scroll_row + EDIT_ROWS)) {
@@ -153,7 +158,7 @@ static void editor_render(const char *name, const char *buffer, UINT16 size, UIN
         }
     }
 
-    editor_index_to_pos(buffer, size, cursor, &doc_row, &doc_col);
+    editor_index_to_pos(buffer, size, render_cursor, &doc_row, &doc_col);
     if (doc_row >= *scroll_row && doc_row < (UINT16)(*scroll_row + EDIT_ROWS)) {
         UINT8 screen_row = (UINT8)(EDIT_CONTENT_ROW + (doc_row - *scroll_row));
         set_cursor(screen_row, (UINT8)doc_col);
