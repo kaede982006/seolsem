@@ -6,6 +6,9 @@ segment _TEXT class=CODE use16
 global _clear_screen
 global _print_message
 global _wait_prompt
+global _read_key
+global _set_cursor
+global _write_char
 
 _clear_screen:
     pusha
@@ -140,7 +143,61 @@ _wait_prompt:
 	pop ds
 	popa
 	pop bp
-	ret ; (호출자가 add sp,2 로 정리)
+    ret ; (호출자가 add sp,2 로 정리)
+
+_read_key:
+    xor ah, ah
+    int 16h
+    ret
+
+_set_cursor:
+    push bp
+    mov  bp, sp
+    push ax
+    push bx
+    push dx
+
+    mov  dh, [bp+4]
+    mov  dl, [bp+6]
+    mov  bh, 0
+    mov  ah, 02h
+    int  10h
+
+    pop  dx
+    pop  bx
+    pop  ax
+    pop  bp
+    ret
+
+_write_char:
+    push bp
+    mov  bp, sp
+    push ax
+    push bx
+    push dx
+    push es
+
+    mov  ax, 0xB800
+    mov  es, ax
+
+    mov  ax, [bp+4]         ; row
+    mov  bx, 160
+    mul  bx                 ; AX = row * 160
+    mov  bx, [bp+6]         ; col
+    shl  bx, 1
+    add  ax, bx
+    mov  di, ax
+
+    mov  al, [bp+8]         ; ch
+    mov  ah, [bp+10]        ; attr
+    mov  [es:di], ax
+
+    pop  es
+    pop  dx
+    pop  bx
+    pop  ax
+    pop  bp
+    ret
 _print_message:
     push bp
     mov  bp, sp

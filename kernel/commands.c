@@ -8,6 +8,187 @@
 static char wrong_command_message[256];
 static char message_buffer[256];
 
+#define EDIT_COLS 80
+#define EDIT_ROWS 23
+#define EDIT_HEADER_ROW 0
+#define EDIT_CONTENT_ROW 1
+#define EDIT_STATUS_ROW 24
+#define EDIT_MAX_SIZE FS_BLOCK_SIZE
+
+#define KEY_ESC 27
+#define KEY_ENTER 13
+#define KEY_BACKSPACE 8
+#define KEY_CTRL_S 19
+#define KEY_CTRL_Q 17
+
+#define SCAN_LEFT 0x4B
+#define SCAN_RIGHT 0x4D
+#define SCAN_UP 0x48
+#define SCAN_DOWN 0x50
+#define SCAN_HOME 0x47
+#define SCAN_END 0x4F
+#define SCAN_DEL 0x53
+
+static void editor_draw_row(UINT8 row, const char *text) {
+    UINT8 col;
+    for (col = 0; col < EDIT_COLS; ++col) {
+        char ch = ' ';
+        if (text && text[col] != '\0') ch = text[col];
+        write_char(row, col, ch, 0x07);
+    }
+}
+
+static void editor_draw_header(const char *name, BOOL modified) {
+    char line[EDIT_COLS + 1];
+    sima_memset(line, ' ', (UINT16)EDIT_COLS);
+    line[EDIT_COLS] = '\0';
+    sima_strcpy(line, (UINT16)sizeof(line), "EDIT - ");
+    sima_strcat(line, (UINT16)sizeof(line), name);
+    if (modified) {
+        sima_strcat(line, (UINT16)sizeof(line), " *");
+    }
+    editor_draw_row(EDIT_HEADER_ROW, line);
+}
+
+static void editor_draw_status(const char *status) {
+    char line[EDIT_COLS + 1];
+    sima_memset(line, ' ', (UINT16)EDIT_COLS);
+    line[EDIT_COLS] = '\0';
+    if (status) {
+        sima_strcpy(line, (UINT16)sizeof(line), status);
+    }
+    editor_draw_row(EDIT_STATUS_ROW, line);
+}
+
+static void editor_clear_content(void) {
+    UINT8 row;
+    for (row = 0; row < EDIT_ROWS; ++row) {
+        editor_draw_row((UINT8)(EDIT_CONTENT_ROW + row), NULL);
+    }
+}
+
+static void editor_index_to_pos(const char *buffer, UINT16 size, UINT16 index, UINT16 *out_row, UINT16 *out_col) {
+    UINT16 row = 0;
+    UINT16 col = 0;
+    UINT16 i;
+    if (index > size) index = size;
+    for (i = 0; i < index; ++i) {
+        char ch = buffer[i];
+        if (ch == '\n') {
+            row++;
+            col = 0;
+        } else {
+            col++;
+            if (col >= EDIT_COLS) {
+                row++;
+                col = 0;
+            }
+        }
+    }
+    *out_row = row;
+    *out_col = col;
+}
+
+static UINT16 editor_index_for_row_col(const char *buffer, UINT16 size, UINT16 target_row, UINT16 target_col) {
+    UINT16 row = 0;
+    UINT16 col = 0;
+    UINT16 i = 0;
+
+    while (i < size) {
+        if (row == target_row && col >= target_col) return i;
+        if (buffer[i] == '\n') {
+            if (row == target_row) return i;
+            row++;
+            col = 0;
+            i++;
+            continue;
+        }
+        col++;
+        i++;
+        if (col >= EDIT_COLS) {
+            if (row == target_row) return i;
+            row++;
+            col = 0;
+        }
+    }
+    return size;
+}
+
+static void editor_render(const char *name, const char *buffer, UINT16 size, UINT16 cursor,
+                          UINT16 *scroll_row, BOOL modified, const char *status) {
+    UINT16 row;
+    UINT16 col;
+    UINT16 doc_row;
+    UINT16 doc_col;
+    UINT16 i;
+
+    editor_index_to_pos(buffer, size, cursor, &doc_row, &doc_col);
+    if (doc_row < *scroll_row) {
+        *scroll_row = doc_row;
+    } else if (doc_row >= (UINT16)(*scroll_row + EDIT_ROWS)) {
+        *scroll_row = (UINT16)(doc_row - EDIT_ROWS + 1);
+    }
+
+    editor_draw_header(name, modified);
+    editor_draw_status(status);
+    editor_clear_content();
+
+    row = 0;
+    col = 0;
+    for (i = 0; i < size; ++i) {
+        char ch = buffer[i];
+        if (ch == '\n') {
+            row++;
+            col = 0;
+            continue;
+        }
+        if (row >= *scroll_row && row < (UINT16)(*scroll_row + EDIT_ROWS)) {
+            UINT8 screen_row = (UINT8)(EDIT_CONTENT_ROW + (row - *scroll_row));
+            write_char(screen_row, (UINT8)col, ch, 0x07);
+        }
+        col++;
+        if (col >= EDIT_COLS) {
+            row++;
+            col = 0;
+        }
+    }
+
+    editor_index_to_pos(buffer, size, cursor, &doc_row, &doc_col);
+    if (doc_row >= *scroll_row && doc_row < (UINT16)(*scroll_row + EDIT_ROWS)) {
+        UINT8 screen_row = (UINT8)(EDIT_CONTENT_ROW + (doc_row - *scroll_row));
+        set_cursor(screen_row, (UINT8)doc_col);
+    } else {
+        set_cursor(EDIT_CONTENT_ROW, 0);
+    }
+}
+
+static BOOL editor_insert_char(char *buffer, UINT16 *size, UINT16 *cursor, char ch) {
+    if (*size >= EDIT_MAX_SIZE) return FALSE;
+    sima_memmove(buffer + *cursor + 1, buffer + *cursor, (UINT16)(*size - *cursor));
+    buffer[*cursor] = ch;
+    (*size)++;
+    (*cursor)++;
+    buffer[*size] = '\0';
+    return TRUE;
+}
+
+static BOOL editor_delete_before(char *buffer, UINT16 *size, UINT16 *cursor) {
+    if (*cursor == 0 || *size == 0) return FALSE;
+    sima_memmove(buffer + *cursor - 1, buffer + *cursor, (UINT16)(*size - *cursor));
+    (*cursor)--;
+    (*size)--;
+    buffer[*size] = '\0';
+    return TRUE;
+}
+
+static BOOL editor_delete_at(char *buffer, UINT16 *size, UINT16 *cursor) {
+    if (*cursor >= *size) return FALSE;
+    sima_memmove(buffer + *cursor, buffer + *cursor + 1, (UINT16)(*size - *cursor - 1));
+    (*size)--;
+    buffer[*size] = '\0';
+    return TRUE;
+}
+
 static const char* skip_tokens(const char *buffer, UINT16 count) {
     UINT16 i = 0;
     while (buffer[i] == ' ') ++i;
@@ -104,17 +285,122 @@ static BOOL run_write(const char *name, const char *data) {
 }
 
 static BOOL run_edit(const char *name) {
-    char input[256];
     if (!name) return FALSE;
 
-    sima_memclr(input, (UINT16)sizeof(input));
-    wait_prompt("memo> ", input);
+    {
+        char buffer[EDIT_MAX_SIZE + 1];
+        UINT16 size = 0;
+        UINT16 cursor = 0;
+        UINT16 scroll_row = 0;
+        UINT16 desired_col = 0;
+        BOOL modified = FALSE;
+        char status[EDIT_COLS + 1];
+        UINT16 read_size = 0;
 
-    if (!fs_write(name, (const UINT8*)input, (UINT16)sima_strlen(input))) {
-        print_simple("Unable to save memo.");
-        return TRUE;
+        sima_memclr(buffer, (UINT16)sizeof(buffer));
+        if (fs_read(name, (UINT8*)buffer, EDIT_MAX_SIZE, &read_size)) {
+            size = read_size;
+            buffer[size] = '\0';
+        }
+
+        clear_screen();
+        sima_strcpy(status, (UINT16)sizeof(status),
+                    "Ctrl+S Save  Esc Save&Exit  Ctrl+Q Quit  Arrows Move");
+
+        for (;;) {
+            editor_render(name, buffer, size, cursor, &scroll_row, modified, status);
+            UINT16 key = read_key();
+            UINT8 ascii = (UINT8)(key & 0xFF);
+            UINT8 scan = (UINT8)((key >> 8) & 0xFF);
+
+            if (ascii == KEY_ESC) {
+                if (!fs_write(name, (const UINT8*)buffer, size)) {
+                    print_simple("Unable to save memo.");
+                    return TRUE;
+                }
+                clear_screen();
+                print_simple("Memo saved.");
+                break;
+            }
+
+            if (ascii == KEY_CTRL_Q) {
+                clear_screen();
+                print_simple("Edit cancelled.");
+                break;
+            }
+
+            if (ascii == KEY_CTRL_S) {
+                if (!fs_write(name, (const UINT8*)buffer, size)) {
+                    sima_strcpy(status, (UINT16)sizeof(status), "Save failed.");
+                } else {
+                    sima_strcpy(status, (UINT16)sizeof(status), "Saved.");
+                    modified = FALSE;
+                }
+                continue;
+            }
+
+            if (ascii == KEY_BACKSPACE) {
+                if (editor_delete_before(buffer, &size, &cursor)) {
+                    modified = TRUE;
+                }
+                continue;
+            }
+
+            if (ascii == KEY_ENTER) {
+                if (editor_insert_char(buffer, &size, &cursor, '\n')) {
+                    modified = TRUE;
+                }
+                continue;
+            }
+
+            if (ascii == 0 || ascii == 0xE0) {
+                UINT16 row;
+                UINT16 col;
+                editor_index_to_pos(buffer, size, cursor, &row, &col);
+                desired_col = col;
+
+                if (scan == SCAN_LEFT) {
+                    if (cursor > 0) cursor--;
+                    continue;
+                }
+                if (scan == SCAN_RIGHT) {
+                    if (cursor < size) cursor++;
+                    continue;
+                }
+                if (scan == SCAN_UP) {
+                    if (row > 0) {
+                        cursor = editor_index_for_row_col(buffer, size, (UINT16)(row - 1), desired_col);
+                    }
+                    continue;
+                }
+                if (scan == SCAN_DOWN) {
+                    cursor = editor_index_for_row_col(buffer, size, (UINT16)(row + 1), desired_col);
+                    continue;
+                }
+                if (scan == SCAN_HOME) {
+                    cursor = editor_index_for_row_col(buffer, size, row, 0);
+                    continue;
+                }
+                if (scan == SCAN_END) {
+                    cursor = editor_index_for_row_col(buffer, size, row, (UINT16)(EDIT_COLS - 1));
+                    continue;
+                }
+                if (scan == SCAN_DEL) {
+                    if (editor_delete_at(buffer, &size, &cursor)) {
+                        modified = TRUE;
+                    }
+                    continue;
+                }
+            }
+
+            if (ascii >= 32 && ascii != 127) {
+                if (editor_insert_char(buffer, &size, &cursor, (char)ascii)) {
+                    modified = TRUE;
+                }
+                continue;
+            }
+        }
     }
-    print_simple("Memo saved.");
     return TRUE;
 }
 
