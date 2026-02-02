@@ -5,5 +5,6 @@
 
 BOOL run_buffer(char* buffer);
 void run_ver();
+void run_help();
 
 #endif

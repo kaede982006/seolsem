@@ -11,5 +11,7 @@ typedef enum { MEMC_SAME = 0, MEMC_DIFF = 1, MEMC_ERR = 2 } MEMC;
 
 typedef unsigned short UINT16;  /* ← 괄호 제거 */
 typedef unsigned char  UINT8;   /* ← 괄호 제거 */
+typedef unsigned long  UINT32;
+typedef signed short   INT16;
 
 #endif

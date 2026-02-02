@@ -2,6 +2,7 @@
 #include "sima_type.h"
 #include "sima_mem.h"
 #include "commands.h"
+#include "sima_fs.h"
 
 static char current_path[256];
 static char buffer[256];
@@ -15,6 +16,7 @@ void kernel_main(void) {
         print_message("Path buffer too small");
         for(;;) {}
     }
+    (void)fs_init();
 	for (;;) {
 		wait_prompt(current_path, buffer);
 		if (buffer[0]=='\0')
