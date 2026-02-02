@@ -8,12 +8,10 @@ _start:
     cli
 
     ; 세그먼트 전부 커널 세그먼트(CS)로 통일
-    push cs
-    pop  ds
-    push cs
-    pop  es
-    push cs
-    pop  ss
+    mov  ax, cs
+    mov  ds, ax
+    mov  es, ax
+    mov  ss, ax
     mov  sp, 0xFFFE
     mov  bp, sp
 
@@ -24,8 +22,8 @@ _start:
     ; 내부 아레나 힙 초기화 (freestanding)
     call _sima_heap_init
 
-    ; 아직 IVT/IRQ 없으면 STI는 보류
-    ; sti
+    ; 실모드 BIOS 키보드 입력은 IRQ1이 필요하므로 인터럽트 활성화
+    sti
 
     ; C 커널 진입
     call _kernel_main

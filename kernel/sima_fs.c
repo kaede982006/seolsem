@@ -11,12 +11,10 @@
 #define FS_DATA_BYTES  ((unsigned long)FS_MAX_FILES * (unsigned long)FS_BLOCK_SIZE)
 #define FS_RAW_BYTES   ((unsigned long)FS_HEADER_SIZE + FS_TABLE_BYTES + FS_DATA_BYTES)
 #define FS_DISK_SECTORS ((FS_RAW_BYTES + 511UL) / 512UL)
-#define FS_IMAGE_BYTES (FS_DISK_SECTORS * 512UL)
 #define FS_DISK_LBA_START 10
 
 static FS_FILE fs_table[FS_MAX_FILES];
 static UINT8 fs_data[FS_DATA_BYTES];
-static UINT8 fs_disk_image[FS_IMAGE_BYTES];
 
 static void fs_write_u16(UINT8 *buf, UINT16 offset, UINT16 value) {
     buf[offset] = (UINT8)(value & 0xFF);
@@ -90,20 +88,20 @@ static void fs_seed_defaults(void) {
     fs_write_in_dir("BIN", "memo.prg", (const UINT8*)memo_program, (UINT16)sima_strlen(memo_program));
 }
 
-static void fs_build_image(void) {
+static void fs_build_header_table(UINT8 *header_table) {
     UINT16 i;
     UINT16 offset;
 
-    sima_memset(fs_disk_image, 0, (UINT16)FS_IMAGE_BYTES);
-    fs_disk_image[0] = 'S';
-    fs_disk_image[1] = 'F';
-    fs_disk_image[2] = 'S';
-    fs_disk_image[3] = '1';
-    fs_write_u16(fs_disk_image, 4, FS_VERSION);
-    fs_write_u16(fs_disk_image, 6, FS_BLOCK_SIZE);
-    fs_write_u16(fs_disk_image, 8, FS_MAX_FILES);
-    fs_write_u16(fs_disk_image, 10, FS_DATA_BYTES);
-    fs_write_u16(fs_disk_image, 12, FS_TABLE_BYTES);
+    sima_memset(header_table, 0, (UINT16)(FS_HEADER_SIZE + FS_TABLE_BYTES));
+    header_table[0] = 'S';
+    header_table[1] = 'F';
+    header_table[2] = 'S';
+    header_table[3] = '1';
+    fs_write_u16(header_table, 4, FS_VERSION);
+    fs_write_u16(header_table, 6, FS_BLOCK_SIZE);
+    fs_write_u16(header_table, 8, FS_MAX_FILES);
+    fs_write_u16(header_table, 10, FS_DATA_BYTES);
+    fs_write_u16(header_table, 12, FS_TABLE_BYTES);
 
     offset = FS_HEADER_SIZE;
     for (i = 0; i < FS_MAX_FILES; ++i) {
@@ -113,38 +111,59 @@ static void fs_build_image(void) {
         if (fs_table[i].is_dir) flags |= 0x04;
 
         if (fs_table[i].used) {
-            sima_memcpy(&fs_disk_image[offset], fs_table[i].name, FS_FILENAME_MAX);
-            fs_write_u16(fs_disk_image, (UINT16)(offset + 12), fs_table[i].size);
-            fs_write_u16(fs_disk_image, (UINT16)(offset + 16), fs_table[i].parent);
+            sima_memcpy(&header_table[offset], fs_table[i].name, FS_FILENAME_MAX);
+            fs_write_u16(header_table, (UINT16)(offset + 12), fs_table[i].size);
+            fs_write_u16(header_table, (UINT16)(offset + 16), fs_table[i].parent);
         }
-        fs_disk_image[offset + 14] = flags;
+        header_table[offset + 14] = flags;
         offset = (UINT16)(offset + FS_ENTRY_SIZE);
     }
-
-    sima_memcpy(&fs_disk_image[FS_HEADER_SIZE + FS_TABLE_BYTES], fs_data, FS_DATA_BYTES);
 }
 
-static BOOL fs_load_image(const UINT8 *image) {
+static BOOL fs_read_range(UINT32 offset, UINT8 *out, UINT16 size) {
+    UINT32 pos = offset;
+    UINT16 remaining = size;
+    UINT8 sector[512];
+
+    while (remaining > 0) {
+        UINT32 sector_index = pos / 512UL;
+        UINT16 sector_offset = (UINT16)(pos % 512UL);
+        UINT16 chunk = (UINT16)(512U - sector_offset);
+
+        if (chunk > remaining) chunk = remaining;
+        if (!ide_read_sector(FS_DISK_LBA_START + sector_index, sector)) {
+            return FALSE;
+        }
+        sima_memcpy(out, &sector[sector_offset], chunk);
+        out += chunk;
+        pos += chunk;
+        remaining = (UINT16)(remaining - chunk);
+    }
+    return TRUE;
+}
+
+static BOOL fs_load_from_disk(void) {
     UINT16 i;
     UINT16 offset;
+    UINT8 header_table[FS_HEADER_SIZE + FS_TABLE_BYTES];
 
-    if (!image) return FALSE;
-    if (image[0] != 'S' || image[1] != 'F' || image[2] != 'S' || image[3] != '1') return FALSE;
-    if (fs_read_u16(image, 4) != FS_VERSION) return FALSE;
-    if (fs_read_u16(image, 6) != FS_BLOCK_SIZE) return FALSE;
-    if (fs_read_u16(image, 8) != FS_MAX_FILES) return FALSE;
+    if (!fs_read_range(0, header_table, (UINT16)sizeof(header_table))) return FALSE;
+    if (header_table[0] != 'S' || header_table[1] != 'F' || header_table[2] != 'S' || header_table[3] != '1') return FALSE;
+    if (fs_read_u16(header_table, 4) != FS_VERSION) return FALSE;
+    if (fs_read_u16(header_table, 6) != FS_BLOCK_SIZE) return FALSE;
+    if (fs_read_u16(header_table, 8) != FS_MAX_FILES) return FALSE;
 
     sima_memclr((char*)fs_table, (UINT16)sizeof(fs_table));
     sima_memclr((char*)fs_data, (UINT16)sizeof(fs_data));
 
     offset = FS_HEADER_SIZE;
     for (i = 0; i < FS_MAX_FILES; ++i) {
-        UINT8 flags = image[offset + 14];
+        UINT8 flags = header_table[offset + 14];
         if (flags & 0x01) {
-            sima_memcpy(fs_table[i].name, &image[offset], FS_FILENAME_MAX);
+            sima_memcpy(fs_table[i].name, &header_table[offset], FS_FILENAME_MAX);
             fs_table[i].name[FS_FILENAME_MAX - 1] = '\0';
-            fs_table[i].size = fs_read_u16(image, (UINT16)(offset + 12));
-            fs_table[i].parent = fs_read_u16(image, (UINT16)(offset + 16));
+            fs_table[i].size = fs_read_u16(header_table, (UINT16)(offset + 12));
+            fs_table[i].parent = fs_read_u16(header_table, (UINT16)(offset + 16));
             fs_table[i].used = TRUE;
             fs_table[i].executable = (flags & 0x02) ? TRUE : FALSE;
             fs_table[i].is_dir = (flags & 0x04) ? TRUE : FALSE;
@@ -152,27 +171,44 @@ static BOOL fs_load_image(const UINT8 *image) {
         offset = (UINT16)(offset + FS_ENTRY_SIZE);
     }
 
-    sima_memcpy(fs_data, &image[FS_HEADER_SIZE + FS_TABLE_BYTES], FS_DATA_BYTES);
-    return TRUE;
-}
-
-static BOOL fs_load_from_disk(void) {
-    UINT16 i;
-    for (i = 0; i < FS_DISK_SECTORS; ++i) {
-        if (!ide_read_sector((UINT32)(FS_DISK_LBA_START + i),
-                             &fs_disk_image[i * 512])) {
-            return FALSE;
-        }
-    }
-    return fs_load_image(fs_disk_image);
+    return fs_read_range(FS_HEADER_SIZE + FS_TABLE_BYTES, fs_data, FS_DATA_BYTES);
 }
 
 BOOL fs_sync(void) {
     UINT16 i;
-    fs_build_image();
+    UINT32 sector_offset;
+    UINT16 header_table_size = (UINT16)(FS_HEADER_SIZE + FS_TABLE_BYTES);
+    UINT8 header_table[FS_HEADER_SIZE + FS_TABLE_BYTES];
+    UINT8 sector[512];
+
+    fs_build_header_table(header_table);
+
     for (i = 0; i < FS_DISK_SECTORS; ++i) {
-        if (!ide_write_sector((UINT32)(FS_DISK_LBA_START + i),
-                              &fs_disk_image[i * 512])) {
+        UINT16 copy_size;
+        sima_memset(sector, 0, sizeof(sector));
+        sector_offset = (UINT32)i * 512UL;
+
+        if (sector_offset < header_table_size) {
+            copy_size = (UINT16)(header_table_size - sector_offset);
+            if (copy_size > 512U) copy_size = 512U;
+            sima_memcpy(sector, &header_table[sector_offset], copy_size);
+        }
+
+        if (sector_offset + 512UL > (UINT32)(FS_HEADER_SIZE + FS_TABLE_BYTES)) {
+            UINT32 data_start = (UINT32)(FS_HEADER_SIZE + FS_TABLE_BYTES);
+            UINT32 data_end = data_start + FS_DATA_BYTES;
+            UINT32 overlap_start = sector_offset > data_start ? sector_offset : data_start;
+            UINT32 overlap_end = (sector_offset + 512UL) < data_end ? (sector_offset + 512UL) : data_end;
+
+            if (overlap_end > overlap_start) {
+                UINT16 sector_pos = (UINT16)(overlap_start - sector_offset);
+                UINT16 data_pos = (UINT16)(overlap_start - data_start);
+                UINT16 overlap_size = (UINT16)(overlap_end - overlap_start);
+                sima_memcpy(&sector[sector_pos], &fs_data[data_pos], overlap_size);
+            }
+        }
+
+        if (!ide_write_sector((UINT32)(FS_DISK_LBA_START + i), sector)) {
             return FALSE;
         }
     }

@@ -96,7 +96,7 @@ $(OBJDIR) $(BINDIR):
 
 clean:
 	@echo "[CLEAN]" 
-	@rm -r build
+	@rm -rf build
 
 # 선택: QEMU로 테스트(환경에 맞게 수정)
 run: $(IMG)

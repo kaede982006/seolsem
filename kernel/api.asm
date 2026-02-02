@@ -404,6 +404,8 @@ set_cursor_hw:
 
 ; 맨 아래에
 segment _DATA class=DATA use16
+global _api_data_anchor
+_api_data_anchor db 0
 line   dw 0
 di_pos dw 0
 line_end dw 0

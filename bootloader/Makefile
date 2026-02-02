@@ -68,4 +68,4 @@ dirs: | $(BINDIR)
 
 clean:
 	@echo "[CLEAN]"
-	@rm -r build
+	@rm -rf build
