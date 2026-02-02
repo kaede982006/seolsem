@@ -166,6 +166,16 @@ _wait_prompt:
 
 .end_line:
     inc  word [line]
+    mov  ax, [line]
+    cmp  ax, 25
+    jb   .set_prompt_cursor
+    call scroll_screen
+    mov  word [line], 24
+.set_prompt_cursor:
+    mov  ax, [line]
+    mov  dh, al
+    xor  dl, dl
+    call set_cursor_hw
     ; (복원/ret는 그대로)
 	pop es
 	pop ds
