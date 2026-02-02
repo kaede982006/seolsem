@@ -40,6 +40,18 @@ BOOL program_load(const char *name) {
     return TRUE;
 }
 
+BOOL program_load_in_dir(const char *dir_name, const char *name) {
+    UINT16 size;
+    if (!dir_name || !name) return FALSE;
+    if (!fs_is_executable_in_dir(dir_name, name)) return FALSE;
+    if (!fs_read_in_dir(dir_name, name, program_buffer, PROGRAM_MAX_SIZE, &size)) return FALSE;
+
+    program_size = size;
+    program_buffer[program_size] = '\0';
+    program_loaded = TRUE;
+    return TRUE;
+}
+
 BOOL program_run(void) {
     UINT16 i;
     UINT16 start;

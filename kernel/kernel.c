@@ -3,6 +3,7 @@
 #include "sima_mem.h"
 #include "commands.h"
 #include "sima_fs.h"
+#include "sima_env.h"
 
 static char current_path[256];
 static char buffer[256];
@@ -17,6 +18,7 @@ void kernel_main(void) {
         for(;;) {}
     }
     (void)fs_init();
+    (void)env_init();
 	for (;;) {
 		wait_prompt(current_path, buffer);
 		if (buffer[0]=='\0')

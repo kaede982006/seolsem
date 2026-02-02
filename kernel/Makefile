@@ -24,7 +24,7 @@ LDFILE  := link.lk
 # ------------------------------
 # Sources
 # ------------------------------
-SRCS_C     := kernel.c sima_mem.c sima_conv.c sima_ide.c sima_fs.c sima_program.c commands.c
+SRCS_C     := kernel.c sima_mem.c sima_conv.c sima_ide.c sima_fs.c sima_program.c sima_env.c commands.c
 SRCS_ASM   := api.asm kernel_entry.asm sima_heap.asm sima_ioport.asm
 
 # ------------------------------
@@ -77,13 +77,14 @@ $(OBJDIR)/%.obj: %.asm | $(OBJDIR)
 # Headers (간단 수동 의존성—필요시 추가)
 # ------------------------------
 # C 파일별 직접 의존(예: 타입/프로토타입 헤더)
-$(OBJDIR)/kernel.obj:        sima_io.h sima_type.h sima_mem.h sima_fs.h
+$(OBJDIR)/kernel.obj:        sima_io.h sima_type.h sima_mem.h sima_fs.h sima_env.h
 $(OBJDIR)/sima_mem.obj:      sima_type.h sima_mem.h
 $(OBJDIR)/sima_conv.obj:     sima_type.h sima_mem.h sima_conv.h
 $(OBJDIR)/sima_ide.obj:      sima_type.h sima_ide.h
 $(OBJDIR)/sima_fs.obj:       sima_type.h sima_mem.h sima_fs.h sima_ide.h
 $(OBJDIR)/sima_program.obj:  sima_type.h sima_program.h sima_fs.h sima_io.h
-$(OBJDIR)/commands.obj:      sima_type.h sima_mem.h sima_conv.h sima_fs.h sima_program.h sima_io.h
+$(OBJDIR)/commands.obj:      sima_type.h sima_mem.h sima_conv.h sima_fs.h sima_program.h sima_io.h sima_env.h
+$(OBJDIR)/sima_env.obj:      sima_type.h sima_env.h sima_fs.h sima_mem.h
 
 # ------------------------------
 # Utility targets
