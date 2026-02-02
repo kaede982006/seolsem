@@ -84,9 +84,7 @@ _wait_prompt:
     mov  ax, dx
     shr  ax, 1
     mov  dl, al
-    mov  bh, 0
-    mov  ah, 02h
-    int  10h
+    call set_cursor_hw
 .poll:
 .wait_key:
     mov  ah, 01h
@@ -165,19 +163,9 @@ _read_key:
 _set_cursor:
     push bp
     mov  bp, sp
-    push ax
-    push bx
-    push dx
-
     mov  dh, [bp+4]
     mov  dl, [bp+6]
-    mov  bh, 0
-    mov  ah, 02h
-    int  10h
-
-    pop  dx
-    pop  bx
-    pop  ax
+    call set_cursor_hw
     pop  bp
     ret
 
@@ -249,21 +237,22 @@ _print_message:
     cmp  cl, 10
     je   .newline
     cmp  cl, 13
-    je   .newline
+    je   .carriage_return
     mov  [es:di], cl
     mov  byte [es:di+1], 0x07
     inc  si
     add  di, 2
     mov  bl, 0
-    jmp  .print_loop
+    mov  ax, di
+    sub  ax, [di_pos]
+    cmp  ax, 160
+    jb   .print_loop
+    jmp  .wrap
 .newline:
-    inc  word [line]
-    mov  ax, [line]
-    cmp  ax, 25
-    jb   .newline_ok
-    call scroll_screen
-    mov  word [line], 24
-.newline_ok:
+    call .advance_line
+    inc  si
+    jmp  .print_loop
+.carriage_return:
     mov  ax, [line]
     mov  bx, 160
     mul  bx
@@ -272,6 +261,24 @@ _print_message:
     mov  bl, 1
     inc  si
     jmp  .print_loop
+.wrap:
+    call .advance_line
+    jmp  .print_loop
+.advance_line:
+    inc  word [line]
+    mov  ax, [line]
+    cmp  ax, 25
+    jb   .advance_ok
+    call scroll_screen
+    mov  word [line], 24
+.advance_ok:
+    mov  ax, [line]
+    mov  bx, 160
+    mul  bx
+    mov  [di_pos], ax
+    mov  di, [di_pos]
+    mov  bl, 1
+    ret
 .end:
     cmp  bl, 1
     je   .done
@@ -309,6 +316,38 @@ scroll_screen:
     pop  es
     pop  ds
     popa
+    ret
+
+set_cursor_hw:
+    push ax
+    push bx
+    push dx
+
+    mov  al, dh
+    xor  ah, ah
+    mov  bl, 80
+    mul  bl                 ; AX = row * 80
+    mov  bl, dl
+    xor  bh, bh
+    add  ax, bx             ; AX = row * 80 + col
+    mov  bx, ax
+
+    mov  dx, 0x3D4
+    mov  al, 0x0F
+    out  dx, al
+    mov  dx, 0x3D5
+    mov  al, bl
+    out  dx, al
+    mov  dx, 0x3D4
+    mov  al, 0x0E
+    out  dx, al
+    mov  dx, 0x3D5
+    mov  al, bh
+    out  dx, al
+
+    pop  dx
+    pop  bx
+    pop  ax
     ret
 
 ; 맨 아래에
