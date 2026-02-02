@@ -168,7 +168,8 @@ _wait_prompt:
     ; di가 입력 시작 이전/같으면 지우지 않음
     cmp  di, bx
     jne  .backspace_ok
-    cmp  word [line], [line_start]
+    mov  ax, [line]
+    cmp  ax, [line_start]
     jbe  .poll
 .backspace_ok:
     cmp  di, [di_pos]
