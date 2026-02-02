@@ -130,18 +130,19 @@ _wait_prompt:
     jz   .poll
 
     ; 4) 최대 입력 길이 제한
+    mov  dl, al
     mov  ax, si
     sub  ax, cx
     cmp  ax, INPUT_MAX
     jae  .poll
 
     ; 5) 일반 문자 출력
-    mov  [es:di], al
+    mov  [es:di], dl
     mov  byte [es:di+1], 0x07
     add  di, 2
 
 	; 일반 문자 입력
-    mov  [si], al      ; 버퍼에 기록
+    mov  [si], dl      ; 버퍼에 기록
     inc  si
     mov  byte [si], 0  ; 널 유지
 
