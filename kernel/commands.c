@@ -47,6 +47,7 @@ void run_help() {
     print_message("  ls              - List files");
     print_message("  cat <file>      - Display file contents");
     print_message("  write <file> <data> - Write text to file");
+    print_message("  edit <file>     - Open memo editor");
     print_message("  rm <file>       - Delete file");
     print_message("  load <file>     - Load program to memory");
     print_message("  run             - Run loaded program");
@@ -99,6 +100,21 @@ static BOOL run_write(const char *name, const char *data) {
         return TRUE;
     }
     print_simple("Write complete.");
+    return TRUE;
+}
+
+static BOOL run_edit(const char *name) {
+    char input[256];
+    if (!name) return FALSE;
+
+    sima_memclr(input, (UINT16)sizeof(input));
+    wait_prompt("memo> ", input);
+
+    if (!fs_write(name, (const UINT8*)input, (UINT16)sima_strlen(input))) {
+        print_simple("Unable to save memo.");
+        return TRUE;
+    }
+    print_simple("Memo saved.");
     return TRUE;
 }
 
@@ -187,6 +203,9 @@ BOOL run_buffer(char *buffer)
         const char *data = skip_tokens(buffer, 2);
         return run_write(argv[1], data);
     }
+    if (sima_strcmp(argv[0], "edit") == STRC_SAME && argc == 2) {
+        return run_edit(argv[1]);
+    }
     if (sima_strcmp(argv[0], "rm") == STRC_SAME && argc == 2) {
         return run_rm(argv[1]);
     }
@@ -207,6 +226,7 @@ BOOL run_buffer(char *buffer)
         sima_strcmp(argv[0], "ls") == STRC_SAME ||
         sima_strcmp(argv[0], "cat") == STRC_SAME ||
         sima_strcmp(argv[0], "write") == STRC_SAME ||
+        sima_strcmp(argv[0], "edit") == STRC_SAME ||
         sima_strcmp(argv[0], "rm") == STRC_SAME ||
         sima_strcmp(argv[0], "load") == STRC_SAME ||
         sima_strcmp(argv[0], "run") == STRC_SAME ||

@@ -68,8 +68,13 @@ static void fs_seed_defaults(void) {
         "PRINT Welcome to Seolsem OS\n"
         "PRINT Type HELP to see available commands.\n"
         "EXIT\n";
+    static const char memo_program[] =
+        "PRINT Memo Pad\n"
+        "PRINT Use: EDIT <file> to write a memo.\n"
+        "EXIT\n";
 
     fs_write("hello.prg", (const UINT8*)program, (UINT16)sima_strlen(program));
+    fs_write("memo.prg", (const UINT8*)memo_program, (UINT16)sima_strlen(memo_program));
 }
 
 static void fs_build_image(void) {

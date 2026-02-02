@@ -19,6 +19,8 @@ _clear_screen:
 .cls_loop:
     stosw
     loop .cls_loop
+    mov  word [line], 0
+    mov  word [di_pos], 0
     pop  es
     popa
     ret
