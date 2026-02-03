@@ -2,6 +2,8 @@
 %define __SIMA_IOPORT__
 [bits 16]
 
+segment _TEXT class=CODE use16
+
 global _io_inb
 global _io_outb
 global _io_inw

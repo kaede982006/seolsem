@@ -4,6 +4,9 @@ FORMAT RAW BIN
 OPTION NODEFAULTLIBS
 OPTION START=_start
 
+file build/obj/dgroup_marker.obj
+file build/obj/bss_start.obj
+file build/obj/code_marker.obj
 file build/obj/kernel_entry.obj
 file build/obj/kernel.obj
 file build/obj/api.obj
@@ -16,5 +19,7 @@ file build/obj/sima_env.obj
 file build/obj/sima_heap.obj
 file build/obj/sima_ioport.obj
 file build/obj/commands.obj
+file build/obj/code_end.obj
+file build/obj/bss_end.obj
 
 name build/bin/kernel.img

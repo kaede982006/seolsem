@@ -9,22 +9,23 @@ load_img:
 	mov byte [sector_number], al
 	mov bx, word [bp+6]
 	mov word [total_sector_count], bx
+    mov byte [head_number], 0x00
+    mov byte [track_number], 0x00
 reset_disk:
     mov ax, 0
-    mov dl, 0
+    mov dl, byte [boot_drive]
     int 0x13
     jc loading_error
 
     mov ah, 0x08
-    mov dl, 0x80
+    mov dl, byte [boot_drive]
     int 0x13
     jc loading_error
-    
-	inc dh
 
     mov al, cl
     and al, 0x3f  ; 하위 6비트만 남겨서 순수한 섹터 수를 얻음
     mov byte [disk_sector_per_track], al
+    mov byte [disk_max_head], dh
 
     mov si, word [bp+4]
     ; <-- 수정된 부분: 루프 시작 전 ES를 목적지 메모리 세그먼트로 설정
@@ -44,7 +45,7 @@ read_data:
     mov ch, byte [track_number]
     mov cl, byte [sector_number]
     mov dh, byte [head_number]
-    mov dl, 0x80
+    mov dl, byte [boot_drive]
     int 0x13
     jc loading_error
 
@@ -60,12 +61,14 @@ read_data:
     cmp al, byte [disk_sector_per_track]
     jle read_data
 
-    xor byte [head_number], 0x1
     mov byte [sector_number], 0x01
+    mov al, byte [head_number]
+    inc al
+    mov byte [head_number], al
+    cmp al, byte [disk_max_head]
+    jbe read_data
 
-    cmp byte [head_number], 0x00
-    jne read_data
-
+    mov byte [head_number], 0x00
     add byte [track_number], 0x01
     jmp read_data
 
@@ -81,11 +84,13 @@ loading_error:
     jmp $
 
 disk_err_message: db "Disk Read Error: System Halted", 0
+boot_drive: db 0x00
 sector_number: db 0x02
 head_number: db 0x00
 track_number: db 0x00
 total_sector_count: dw 0x00
 disk_sector_per_track: dw 0x00
+disk_max_head: db 0x00
 
 extern print_message
 extern line

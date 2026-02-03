@@ -15,18 +15,18 @@ global _sima_heap_remaining, sima_heap_remaining
 %endif
 
 ; ----- 상태 -----
-section .bss
+segment _BSS class=BSS use16
 align 2
 sima_heap_buf:    resb  SIMA_HEAP_SIZE    ; 내부 정적 힙 버퍼
 
-section .data
+segment _DATA class=DATA use16
 align 2
 heap_base_seg:    dw 0
 heap_base_off:    dw 0
 heap_top_off:     dw 0                    ; 사용 중 오프셋
 heap_cap:         dw SIMA_HEAP_SIZE
 
-section .text
+segment _TEXT class=CODE use16
 
 ; 내부: 2바이트 정렬 보정
 align2:
@@ -42,11 +42,8 @@ sima_heap_init:
     push bp
     mov  bp, sp
     push ax
-    push ds
 
-    ; 커널 진입부에서 DS=CS 가 맞춰져 있다는 전제(아래 "통합 팁" 참고)
-    mov  ax, cs
-    mov  ds, ax
+    ; 커널 진입부에서 DS=DGROUP 가 맞춰져 있다는 전제
 
     mov  ax, sima_heap_buf
     mov  [heap_base_off], ax
@@ -57,7 +54,6 @@ sima_heap_init:
     mov  ax, SIMA_HEAP_SIZE
     mov  [heap_cap], ax
 
-    pop  ds
     pop  ax
     pop  bp
     ret
@@ -139,4 +135,3 @@ sima_heap_remaining:
     ret
 
 %endif
-

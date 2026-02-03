@@ -8,6 +8,7 @@ jmp 0x07c0:start
 start:
     mov ax, 0x07c0
     mov ds, ax
+    mov [boot_drive], dl
     mov ax, 0xB800
     mov es, ax
 
@@ -28,6 +29,9 @@ start:
     ; 메시지 출력을 위해 line 변수 초기화
     mov word [line], 0
 
+    ; 디버그: stage1 진입 표시
+    mov word [es:0x0000], 0x0731    ; '1'
+
 	mov ax, 0x02
 	mov bx, 0x02
 	mov cx, 0x1000
@@ -38,6 +42,7 @@ start:
 	call load_img
 	add sp, 6
 
+    mov dl, [boot_drive]
     jmp 0x1000:0x0000
 
 %include "read.asm"

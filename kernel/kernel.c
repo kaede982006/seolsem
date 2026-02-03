@@ -9,6 +9,8 @@ static char current_path[256];
 static char buffer[256];
 
 void kernel_main(void) {
+    clear_screen();
+    print_message("boot ok");
     if (!sima_memclr(current_path, (UINT16)sizeof(current_path))) {
         print_message("Unable to Initialize Local Path");
         for(;;) {}
@@ -17,10 +19,14 @@ void kernel_main(void) {
         print_message("Path buffer too small");
         for(;;) {}
     }
-    (void)fs_init();
-    (void)env_init();
+    /* TODO: re-enable after verifying basic console I/O. */
+    /* (void)fs_init(); */
+    /* (void)env_init(); */
 	for (;;) {
+        enable_irq();
 		wait_prompt(current_path, buffer);
+        disable_irq();
+        sync_ds();
 		if (buffer[0]=='\0')
 			continue;
 		if(run_buffer(buffer)==FALSE) {
