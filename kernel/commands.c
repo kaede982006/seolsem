@@ -247,7 +247,8 @@ void run_help() {
     print_message("  ver             - Show OS version");
     print_message("  help            - Show this help");
     print_message("  cls             - Clear screen");
-    print_message("  ls              - List files");
+    print_message("  ls [path]       - List files");
+    print_message("  cd [path]       - Change directory");
     print_message("  cat <file>      - Display file contents");
     print_message("  write <file> <data> - Write text to file");
     print_message("  edit <file>     - Open memo editor");
@@ -259,30 +260,44 @@ void run_help() {
     print_message("  sync            - Save filesystem to disk (IDE)");
 }
 
-static BOOL run_ls(void) {
-    UINT16 i;
-    FS_FILE entry;
+static BOOL run_ls(const char *path) {
+    FS_DIR dir;
+    FS_DIRENT entry;
     char size_buffer[16];
 
-    for (i = 0; i < FS_MAX_FILES; ++i) {
-        if (!fs_get_entry(i, &entry)) continue;
-        if (!entry.used) continue;
-        if (i == FS_ROOT_INDEX) continue;
-        if (entry.parent != FS_ROOT_INDEX) continue;
+    if (!fs_dir_open(path && path[0] ? path : ".", &dir)) {
+        print_simple("Path not found.");
+        return TRUE;
+    }
 
+    while (fs_dir_read(&dir, &entry)) {
         sima_memclr(message_buffer, (UINT16)sizeof(message_buffer));
         sima_strcpy(message_buffer, (UINT16)sizeof(message_buffer), entry.name);
-        sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), " ");
-        sima_utoa(entry.size, size_buffer, (UINT16)sizeof(size_buffer), 10);
-        sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), size_buffer);
-        sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), " bytes ");
         if (entry.is_dir) {
-            sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), "[DIR]");
+            sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), " [DIR]");
         } else {
-            sima_strcat(message_buffer, (UINT16)sizeof(message_buffer),
-                        entry.executable ? "[EXEC]" : "[DATA]");
+            sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), " ");
+            sima_utoa((UINT16)entry.size, size_buffer, (UINT16)sizeof(size_buffer), 10);
+            sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), size_buffer);
+            sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), " bytes");
+            if (entry.is_exec) {
+                sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), " [EXEC]");
+            }
         }
         print_message(message_buffer);
+    }
+    return TRUE;
+}
+
+static BOOL run_cd(const char *path) {
+    if (!path || path[0] == '\0') {
+        if (!fs_cd("/")) {
+            print_simple("Unable to change directory.");
+        }
+        return TRUE;
+    }
+    if (!fs_cd(path)) {
+        print_simple("Directory not found.");
     }
     return TRUE;
 }
@@ -523,8 +538,15 @@ BOOL run_buffer(char *buffer)
     if (sima_strcmp(argv[0], "cls") == STRC_SAME && argc == 1) {
         return run_cls();
     }
-    if (sima_strcmp(argv[0], "ls") == STRC_SAME && argc == 1) {
-        return run_ls();
+    if (sima_strcmp(argv[0], "ls") == STRC_SAME) {
+        if (argc == 1) return run_ls(NULL);
+        if (argc == 2) return run_ls(argv[1]);
+        return wrong_command_usage(buffer);
+    }
+    if (sima_strcmp(argv[0], "cd") == STRC_SAME) {
+        if (argc == 1) return run_cd(NULL);
+        if (argc == 2) return run_cd(argv[1]);
+        return wrong_command_usage(buffer);
     }
     if (sima_strcmp(argv[0], "cat") == STRC_SAME && argc == 2) {
         return run_cat(argv[1]);
@@ -557,6 +579,7 @@ BOOL run_buffer(char *buffer)
     if (sima_strcmp(argv[0], "help") == STRC_SAME ||
         sima_strcmp(argv[0], "cls") == STRC_SAME ||
         sima_strcmp(argv[0], "ls") == STRC_SAME ||
+        sima_strcmp(argv[0], "cd") == STRC_SAME ||
         sima_strcmp(argv[0], "cat") == STRC_SAME ||
         sima_strcmp(argv[0], "write") == STRC_SAME ||
         sima_strcmp(argv[0], "edit") == STRC_SAME ||

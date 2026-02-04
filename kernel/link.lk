@@ -3,6 +3,7 @@ FORMAT RAW BIN
 # 옵션
 OPTION NODEFAULTLIBS
 OPTION START=_start
+OPTION MAP=build/bin/kernel.map
 
 file build/obj/dgroup_marker.obj
 file build/obj/bss_start.obj

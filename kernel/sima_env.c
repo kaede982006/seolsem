@@ -100,7 +100,7 @@ BOOL env_init(void) {
     UINT16 start = 0;
 
     env_clear();
-    if (!fs_read("XENV.ENV", buffer, FS_BLOCK_SIZE, &size)) {
+    if (!fs_read("/XENV.ENV", buffer, FS_BLOCK_SIZE, &size)) {
         return FALSE;
     }
 
@@ -126,4 +126,3 @@ const char *env_get(const char *name) {
     }
     return (const char*)0;
 }
-

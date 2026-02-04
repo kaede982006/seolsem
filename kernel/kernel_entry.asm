@@ -3,6 +3,7 @@ extern _kernel_main
 extern _sima_heap_init
 extern __bss_start
 extern __bss_end
+extern _dgroup_seg_cs
 global _start
 
 segment _TEXT class=CODE use16
@@ -12,19 +13,16 @@ _start:
 .real_start:
     cli
 
-    ; 디버그: 커널 진입 표시
-    mov  ax, 0xB800
-    mov  es, ax
-    mov  word [es:0x0004], 0x074B   ; 'K'
-
     ; DS는 부트로더에서 DGROUP으로 설정됨
-    mov  ax, ds
-    mov  es, ax
-
     ; Small memory model uses near pointers for locals; keep SS=DS.
+    mov  ax, ds
     mov  ss, ax
     mov  sp, 0xFFFE
     mov  bp, sp
+    mov  es, ax                  ; BSS clear uses ES:DI
+
+    ; Save DGROUP segment for later DS recovery (code segment storage)
+    mov  [cs:_dgroup_seg_cs], ax
 
     cld                     ; 문자열 방향 플래그 정방향
 
@@ -38,8 +36,8 @@ _start:
     ; 내부 아레나 힙 초기화 (freestanding)
     call _sima_heap_init
 
-    ; 실모드 BIOS 키보드 입력은 IRQ1이 필요하므로 인터럽트 활성화
-    sti
+    ; 인터럽트는 커널 메인 루프에서 입력 처리 직전에만 켬.
+    ; (BIOS IRQ 핸들러가 DS를 보존하지 않는 경우가 있어, 초기화 중에는 끄는 편이 안전)
 
     ; C 커널 진입
     call _kernel_main

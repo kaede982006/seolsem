@@ -1,49 +1,60 @@
 [org 0x00]
 [bits 16]
 
-section .text
+jmp short boot_start
+nop
 
-jmp 0x07c0:start
+; FAT12 BIOS Parameter Block (patched by image builder)
+OEMName           db 'SEOLSEM '
+bpbBytesPerSec    dw 512
+bpbSecPerClust    db 1
+bpbResSectors     dw 0
+bpbFATs           db 2
+bpbRootEnts       dw 224
+bpbSectors        dw 2880
+bpbMedia          db 0xF0
+bpbFATsecs        dw 9
+bpbSecPerTrack    dw 18
+bpbHeads          dw 2
+bpbHiddenSecs     dd 0
+bpbHugeSectors    dd 0
 
-start:
+; Extended boot record (FAT12/FAT16)
+bsDriveNum        db 0
+bsReserved1       db 0
+bsBootSig         db 0x29
+bsVolID           dd 0x12345678
+bsVolLabel        db 'SEOLSEM    '
+bsFileSys         db 'FAT12   '
+
+boot_start:
+    cli
     mov ax, 0x07c0
     mov ds, ax
     mov [boot_drive], dl
-    mov ax, 0xB800
-    mov es, ax
 
-    mov ax, 0x0000
+    xor ax, ax
     mov ss, ax
     mov sp, 0xFFFE
-    mov bp, 0xFFFE
+    mov bp, sp
 
-    mov si, 0
-.clear_screen:
-    mov byte [es:si], 0
-    mov byte [es:si+1], 0x07
+    ; Load stage2 from reserved sectors (bpbResSectors - 1)
+    mov ax, [bpbResSectors]
+    dec ax
+    mov bx, ax
+    mov ax, 0x02
+    mov cx, 0x1000
+    push ax
+    push bx
+    push cx
 
-    add si, 2
-    cmp si, 80*25*2
-    jl .clear_screen
-
-    ; 메시지 출력을 위해 line 변수 초기화
-    mov word [line], 0
-
-    ; 디버그: stage1 진입 표시
-    mov word [es:0x0000], 0x0731    ; '1'
-
-	mov ax, 0x02
-	mov bx, 0x02
-	mov cx, 0x1000
-	push ax
-	push bx
-	push cx
-	
-	call load_img
-	add sp, 6
+    call load_img
+    add sp, 6
 
     mov dl, [boot_drive]
     jmp 0x1000:0x0000
+
+boot_drive: db 0x00
 
 %include "read.asm"
 

@@ -59,15 +59,26 @@ BOOL program_run(void) {
 
     start = 0;
     for (i = 0; i <= program_size; ++i) {
-        if (program_buffer[i] == '\r') continue;
-        if (program_buffer[i] == '\n' || program_buffer[i] == '\0') {
+        UINT8 ch = program_buffer[i];
+        BOOL eol = FALSE;
+
+        if (ch == '\r') eol = TRUE;
+        if (ch == '\n' || ch == '\0') eol = TRUE;
+
+        if (eol) {
             char line[128];
             UINT16 len = (UINT16)(i - start);
+
             if (len >= sizeof(line)) len = (UINT16)sizeof(line) - 1;
             sima_memcpy(line, &program_buffer[start], len);
             line[len] = '\0';
             program_handle_line(line);
             if (!program_loaded) break;
+
+            /* Handle CRLF: if we ended on CR and next is LF, skip LF too. */
+            if (ch == '\r' && i < program_size && program_buffer[i + 1] == '\n') {
+                i = (UINT16)(i + 1);
+            }
             start = (UINT16)(i + 1);
         }
     }

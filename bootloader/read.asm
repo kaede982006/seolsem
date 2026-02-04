@@ -78,23 +78,12 @@ read_end:
 	ret
 
 loading_error:
-    push disk_err_message
-    call print_message
-
     jmp $
-
-disk_err_message: db "Disk Read Error: System Halted", 0
-boot_drive: db 0x00
 sector_number: db 0x02
 head_number: db 0x00
 track_number: db 0x00
 total_sector_count: dw 0x00
 disk_sector_per_track: dw 0x00
 disk_max_head: db 0x00
-
-extern print_message
-extern line
-
-%include "api.asm"
 
 %endif
