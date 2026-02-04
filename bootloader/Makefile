@@ -76,3 +76,4 @@ dirs: | $(BINDIR)
 clean:
 	@echo "[CLEAN]"
 	@rm -rf build
+	@rm -f bootloader.img

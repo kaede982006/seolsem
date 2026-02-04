@@ -97,6 +97,7 @@ $(OBJDIR) $(BINDIR):
 clean:
 	@echo "[CLEAN]" 
 	@rm -rf build
+	@rm -f kernel.img
 
 # 선택: QEMU로 테스트(환경에 맞게 수정)
 run: $(IMG)
