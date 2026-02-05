@@ -345,6 +345,7 @@ void run_help() {
     print_message("  write <file> <data> - Write text to file");
     print_message("  edit <file>     - Open memo editor");
     print_message("  rm <file>       - Delete file");
+    print_message("  rmdir <dir>     - Remove empty directory");
     print_message("  mkdir <dir>     - Create directory");
     print_message("  load <file>     - Load program to memory");
     print_message("  run             - Run loaded program");
@@ -642,6 +643,16 @@ static BOOL run_rm(const char *name) {
     return TRUE;
 }
 
+static BOOL run_rmdir(const char *name) {
+    if (!name) return FALSE;
+    if (!fs_delete_dir(name)) {
+        print_simple("Unable to remove directory.");
+        return TRUE;
+    }
+    print_simple("Directory removed.");
+    return TRUE;
+}
+
 static BOOL run_mkdir(const char *name) {
     if (!name) return FALSE;
     if (!fs_create_dir(name)) {
@@ -743,6 +754,9 @@ BOOL run_buffer(char *buffer)
     if (sima_strcmp(argv[0], "rm") == STRC_SAME && argc == 2) {
         return run_rm(argv[1]);
     }
+    if (sima_strcmp(argv[0], "rmdir") == STRC_SAME && argc == 2) {
+        return run_rmdir(argv[1]);
+    }
     if (sima_strcmp(argv[0], "mkdir") == STRC_SAME && argc == 2) {
         return run_mkdir(argv[1]);
     }
@@ -770,6 +784,7 @@ BOOL run_buffer(char *buffer)
         sima_strcmp(argv[0], "write") == STRC_SAME ||
         sima_strcmp(argv[0], "edit") == STRC_SAME ||
         sima_strcmp(argv[0], "rm") == STRC_SAME ||
+        sima_strcmp(argv[0], "rmdir") == STRC_SAME ||
         sima_strcmp(argv[0], "mkdir") == STRC_SAME ||
         sima_strcmp(argv[0], "load") == STRC_SAME ||
         sima_strcmp(argv[0], "run") == STRC_SAME ||

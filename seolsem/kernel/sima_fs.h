@@ -24,6 +24,8 @@ typedef struct {
     UINT32 offset;           /* byte offset within current cluster */
     UINT16 root_index;       /* entry index for root directory (legacy FAT12/16 root) */
     BOOL root;               /* TRUE if iterating root directory (legacy FAT12/16) */
+    UINT32 guard_clusters;   /* safety guard for corrupted FAT chains */
+    BOOL error;              /* TRUE if an I/O or consistency error occurred */
 } FS_DIR;
 
 BOOL fs_init(void);
@@ -49,6 +51,7 @@ BOOL fs_create_dir(const char *name);
 BOOL fs_write(const char *name, const UINT8 *data, UINT32 size); /** Changed size to UINT32 */
 BOOL fs_write_in_dir(const char *dir_name, const char *name, const UINT8 *data, UINT32 size); /** Changed size to UINT32 */
 BOOL fs_delete(const char *name);
+BOOL fs_delete_dir(const char *name);
 BOOL fs_sync(void);
 
 #endif

@@ -97,6 +97,8 @@ static char   g_cwd_path[FS_PATH_MAX] = "/";
 
 /* Forward declarations used by prompt path normalization. */
 static UINT8 to_upper(UINT8 ch);
+static UINT32 fat_max_cluster(void);
+static BOOL fat_cluster_is_valid(UINT32 cluster);
 static const char *fat_skip_separators(const char *cursor);
 static BOOL fat_next_segment(const char **path_cursor, char *segment, UINT16 segment_cap);
 
@@ -386,6 +388,8 @@ static UINT32 fat_get_entry(UINT32 cluster) {
     UINT32 sector_val_offset;
     UINT32 entry_val = 0;
 
+    if (!fat_cluster_is_valid(cluster)) return FAT_BAD_CLUSTER;
+
     if (g_fat_type == FAT_TYPE_FAT12) {
         fat_offset = cluster + (cluster / 2);
     } else if (g_fat_type == FAT_TYPE_FAT16) {
@@ -426,6 +430,8 @@ static UINT32 fat_get_entry(UINT32 cluster) {
 static BOOL fat_set_entry(UINT32 cluster, UINT32 value) {
     UINT32 fat_offset;
     UINT32 sector_val_offset;
+
+    if (!fat_cluster_is_valid(cluster)) return FALSE;
 
     if (g_fat_type == FAT_TYPE_FAT12) {
         fat_offset = cluster + (cluster / 2);
@@ -483,6 +489,9 @@ static UINT32 fat_cluster_to_lba(UINT32 cluster) {
  */
 static UINT32 fat_next_cluster(UINT32 cluster) {
     UINT32 val = fat_get_entry(cluster);
+    UINT32 max = fat_max_cluster();
+
+    if (!fat_cluster_is_valid(cluster)) return 0;
     
     if (g_fat_type == FAT_TYPE_FAT12) {
         if (val >= 0xFF8) return 0;
@@ -493,6 +502,8 @@ static UINT32 fat_next_cluster(UINT32 cluster) {
     }
     if (val == 0) return 0; /* Free cluster shouldn't happen in valid chain */
     if (val == FAT_BAD_CLUSTER) return 0;
+    if (val < 2) return 0;
+    if (val > max) return 0;
 
     return val;
 }
@@ -510,9 +521,12 @@ static BOOL fat_read_root_entry(UINT16 index, FAT_DIR_RAW *out) {
 }
 
 static BOOL fat_read_cluster_entry(UINT32 cluster, UINT32 offset, FAT_DIR_RAW *out) {
+    UINT32 cluster_bytes = (UINT32)1 << (g_spc_shift + 9);
     UINT32 lba = fat_cluster_to_lba(cluster) + (offset >> 9);
     UINT16 off_in_sector = (UINT16)(offset & (SECTOR_SIZE - 1));
 
+    if (!fat_cluster_is_valid(cluster)) return FALSE;
+    if (offset + 32U > cluster_bytes) return FALSE;
     if (!read_sector(lba, g_sector)) return FALSE;
     sima_memcpy(out, &g_sector[off_in_sector], sizeof(FAT_DIR_RAW));
     return TRUE;
@@ -522,26 +536,48 @@ static BOOL fat_read_cluster_entry(UINT32 cluster, UINT32 offset, FAT_DIR_RAW *o
  * Directory Iterator 
  */
 static BOOL fat_dir_read_raw(FS_DIR *dir, FAT_DIR_RAW *out) {
+    UINT32 cluster_guard_limit = fat_max_cluster();
+    if (cluster_guard_limit > 8192U) cluster_guard_limit = 8192U;
+
+    if (!dir || !out) return FALSE;
+    if (dir->error) return FALSE;
+
     while (TRUE) {
         /* Legacy Root Directory (FAT12/16) */
         if (dir->root && g_fat_type != FAT_TYPE_FAT32) {
             if (dir->root_index >= g_bpb.root_ents) return FALSE;
-            if (!fat_read_root_entry(dir->root_index, out)) return FALSE;
+            if (!fat_read_root_entry(dir->root_index, out)) {
+                dir->error = TRUE;
+                return FALSE;
+            }
             dir->root_index++;
         } 
         /* Cluster Chain Directory */
         else {
             UINT32 cluster_bytes;
-            if (dir->cur_cluster < 2) return FALSE; /* Should imply EOC or invalid */
+            if (!fat_cluster_is_valid(dir->cur_cluster)) {
+                /* Invalid starting cluster for a cluster-chain directory. */
+                dir->error = TRUE;
+                return FALSE;
+            }
             
             cluster_bytes = (UINT32)1 << (g_spc_shift + 9);
             if (dir->offset >= cluster_bytes) {
-                dir->cur_cluster = fat_next_cluster(dir->cur_cluster);
+                UINT32 next_cluster = fat_next_cluster(dir->cur_cluster);
                 dir->offset = 0;
-                if (dir->cur_cluster < 2) return FALSE;
+                if (next_cluster < 2) return FALSE;
+                dir->cur_cluster = next_cluster;
+                dir->guard_clusters++;
+                if (dir->guard_clusters > cluster_guard_limit) {
+                    dir->error = TRUE;
+                    return FALSE;
+                }
             }
 
-            if (!fat_read_cluster_entry(dir->cur_cluster, dir->offset, out)) return FALSE;
+            if (!fat_read_cluster_entry(dir->cur_cluster, dir->offset, out)) {
+                dir->error = TRUE;
+                return FALSE;
+            }
             dir->offset += 32;
         }
 
@@ -576,7 +612,7 @@ static BOOL fat_build_83(const char *input, UINT8 out[11]) {
     i = 0;
     while (input[i] != '\0') {
         char ch = input[i];
-        if (ch == '/' || ch == '\\') break;
+        if (ch == '/' || ch == '\\') return FALSE;
         if (ch == '.') {
             if (in_ext) return FALSE;
             in_ext = TRUE;
@@ -650,6 +686,12 @@ static UINT32 fat_max_cluster(void) {
     return g_count_of_clusters + 1;
 }
 
+static BOOL fat_cluster_is_valid(UINT32 cluster) {
+    UINT32 max = fat_max_cluster();
+    if (max < 2) return FALSE;
+    return (cluster >= 2 && cluster <= max);
+}
+
 static UINT32 g_alloc_hint = 2;
 
 static BOOL fat_find_free_cluster(UINT32 *out_cluster) {
@@ -720,6 +762,7 @@ static BOOL fat_alloc_chain(UINT32 count, UINT32 *out_first_cluster) {
         }
         if (prev >= 2) {
             if (!fat_set_entry(prev, cluster)) {
+                (void)fat_set_entry(cluster, FAT_FREE_CLUSTER);
                 if (first >= 2) (void)fat_free_chain(first);
                 return FALSE;
             }
@@ -750,7 +793,7 @@ static BOOL fat_loc_to_lba(const FAT_DIR_LOC *loc, UINT32 *out_lba, UINT16 *out_
         return TRUE;
     }
 
-    if (loc->cluster < 2) return FALSE;
+    if (!fat_cluster_is_valid(loc->cluster)) return FALSE;
     *out_lba = fat_cluster_to_lba(loc->cluster) + (loc->offset >> 9);
     *out_off_in_sector = (UINT16)(loc->offset & (SECTOR_SIZE - 1));
     return TRUE;
@@ -807,6 +850,8 @@ static BOOL fat_find_in_dir_loc(UINT32 dir_cluster, const char *name, FAT_DIR_RA
     UINT32 cluster;
     UINT32 cluster_bytes;
     UINT32 offset;
+    UINT32 iter = 0;
+    UINT32 max_iter = fat_max_cluster();
 
     if (!name || name[0] == '\0' || !out_raw || !out_loc) return FALSE;
 
@@ -828,9 +873,12 @@ static BOOL fat_find_in_dir_loc(UINT32 dir_cluster, const char *name, FAT_DIR_RA
         return FALSE;
     }
 
+    if (!fat_cluster_is_valid(dir_cluster)) return FALSE;
+
     cluster = dir_cluster;
     cluster_bytes = (UINT32)1 << (g_spc_shift + 9);
-    while (cluster >= 2) {
+    if (max_iter > 8192U) max_iter = 8192U;
+    while (fat_cluster_is_valid(cluster) && iter <= max_iter) {
         for (offset = 0; offset < cluster_bytes; offset += 32) {
             if (!fat_read_cluster_entry(cluster, offset, &raw)) return FALSE;
             if (raw.name[0] == 0x00) return FALSE;
@@ -846,44 +894,54 @@ static BOOL fat_find_in_dir_loc(UINT32 dir_cluster, const char *name, FAT_DIR_RA
             }
         }
         cluster = fat_next_cluster(cluster);
+        ++iter;
     }
     return FALSE;
 }
 
 static BOOL fat_find_free_in_dir(UINT32 dir_cluster, FAT_DIR_LOC *out_loc, BOOL *out_is_end_marker) {
-    FAT_DIR_RAW raw;
     FAT_DIR_LOC first_deleted;
     BOOL have_deleted = FALSE;
     UINT32 cluster;
-    UINT32 cluster_bytes;
-    UINT32 offset;
+    UINT32 iter = 0;
+    UINT32 max_iter = fat_max_cluster();
 
     if (!out_loc) return FALSE;
     if (out_is_end_marker) *out_is_end_marker = FALSE;
     sima_memclr((char*)&first_deleted, (UINT16)sizeof(FAT_DIR_LOC));
 
     if (g_fat_type != FAT_TYPE_FAT32 && dir_cluster == 0) {
-        UINT16 index;
-        for (index = 0; index < g_bpb.root_ents; ++index) {
-            if (!fat_read_root_entry(index, &raw)) return FALSE;
-            if (raw.name[0] == 0xE5) {
-                if (!have_deleted) {
-                    have_deleted = TRUE;
-                    first_deleted.root = TRUE;
-                    first_deleted.root_index = index;
+        /* Scan root directory sector-by-sector to avoid thousands of redundant reads. */
+        UINT16 max_entries = g_bpb.root_ents;
+        UINT16 sectors = (UINT16)g_root_dir_sectors;
+        UINT16 sector_index;
+        UINT16 entry_index;
+
+        for (sector_index = 0; sector_index < sectors; ++sector_index) {
+            if (!read_sector(g_root_start_lba + sector_index, g_sector)) return FALSE;
+            for (entry_index = 0; entry_index < (SECTOR_SIZE / 32); ++entry_index) {
+                UINT16 index = (UINT16)(sector_index * (SECTOR_SIZE / 32) + entry_index);
+                FAT_DIR_RAW *raw = (FAT_DIR_RAW*)&g_sector[entry_index * 32];
+                if (index >= max_entries) break;
+                if (raw->name[0] == 0xE5) {
+                    if (!have_deleted) {
+                        have_deleted = TRUE;
+                        first_deleted.root = TRUE;
+                        first_deleted.root_index = index;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if (raw.name[0] == 0x00) {
-                if (have_deleted) {
-                    sima_memcpy(out_loc, &first_deleted, (UINT16)sizeof(FAT_DIR_LOC));
+                if (raw->name[0] == 0x00) {
+                    if (have_deleted) {
+                        sima_memcpy(out_loc, &first_deleted, (UINT16)sizeof(FAT_DIR_LOC));
+                        return TRUE;
+                    }
+                    sima_memclr((char*)out_loc, (UINT16)sizeof(FAT_DIR_LOC));
+                    out_loc->root = TRUE;
+                    out_loc->root_index = index;
+                    if (out_is_end_marker) *out_is_end_marker = TRUE;
                     return TRUE;
                 }
-                sima_memclr((char*)out_loc, (UINT16)sizeof(FAT_DIR_LOC));
-                out_loc->root = TRUE;
-                out_loc->root_index = index;
-                if (out_is_end_marker) *out_is_end_marker = TRUE;
-                return TRUE;
             }
         }
         if (have_deleted) {
@@ -893,38 +951,50 @@ static BOOL fat_find_free_in_dir(UINT32 dir_cluster, FAT_DIR_LOC *out_loc, BOOL 
         return FALSE;
     }
 
+    if (!fat_cluster_is_valid(dir_cluster)) return FALSE;
+
     cluster = dir_cluster;
-    cluster_bytes = (UINT32)1 << (g_spc_shift + 9);
-    while (cluster >= 2) {
-        for (offset = 0; offset < cluster_bytes; offset += 32) {
-            if (!fat_read_cluster_entry(cluster, offset, &raw)) return FALSE;
-            if (raw.name[0] == 0xE5) {
-                if (!have_deleted) {
-                    have_deleted = TRUE;
-                    first_deleted.root = FALSE;
-                    first_deleted.cluster = cluster;
-                    first_deleted.offset = offset;
+    if (max_iter > 8192U) max_iter = 8192U;
+    while (fat_cluster_is_valid(cluster) && iter <= max_iter) {
+        UINT8 sec_index;
+        UINT32 lba = fat_cluster_to_lba(cluster);
+        for (sec_index = 0; sec_index < g_bpb.sec_per_clus; ++sec_index) {
+            UINT16 entry_index;
+            if (!read_sector(lba + sec_index, g_sector)) return FALSE;
+            for (entry_index = 0; entry_index < (SECTOR_SIZE / 32); ++entry_index) {
+                FAT_DIR_RAW *raw = (FAT_DIR_RAW*)&g_sector[entry_index * 32];
+                UINT32 offset = ((UINT32)sec_index * (UINT32)SECTOR_SIZE) + ((UINT32)entry_index * 32U);
+
+                if (raw->name[0] == 0xE5) {
+                    if (!have_deleted) {
+                        have_deleted = TRUE;
+                        first_deleted.root = FALSE;
+                        first_deleted.cluster = cluster;
+                        first_deleted.offset = offset;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if (raw.name[0] == 0x00) {
-                if (have_deleted) {
-                    sima_memcpy(out_loc, &first_deleted, (UINT16)sizeof(FAT_DIR_LOC));
+                if (raw->name[0] == 0x00) {
+                    if (have_deleted) {
+                        sima_memcpy(out_loc, &first_deleted, (UINT16)sizeof(FAT_DIR_LOC));
+                        return TRUE;
+                    }
+                    sima_memclr((char*)out_loc, (UINT16)sizeof(FAT_DIR_LOC));
+                    out_loc->root = FALSE;
+                    out_loc->cluster = cluster;
+                    out_loc->offset = offset;
+                    if (out_is_end_marker) *out_is_end_marker = TRUE;
                     return TRUE;
                 }
-                sima_memclr((char*)out_loc, (UINT16)sizeof(FAT_DIR_LOC));
-                out_loc->root = FALSE;
-                out_loc->cluster = cluster;
-                out_loc->offset = offset;
-                if (out_is_end_marker) *out_is_end_marker = TRUE;
-                return TRUE;
             }
         }
+
         {
             UINT32 next = fat_next_cluster(cluster);
             if (next < 2) break;
             cluster = next;
         }
+        ++iter;
     }
 
     if (have_deleted) {
@@ -941,27 +1011,34 @@ static BOOL fat_extend_dir_chain(UINT32 dir_cluster, FAT_DIR_LOC *out_new_loc) {
     UINT32 cluster_bytes = (UINT32)1 << (g_spc_shift + 9);
     UINT32 lba;
     UINT8 sec_index;
+    UINT32 iter = 0;
+    UINT32 max_iter = fat_max_cluster();
 
     if (!out_new_loc) return FALSE;
     if (g_fat_type == FAT_TYPE_FAT12) return FALSE;
-    if (dir_cluster < 2) return FALSE;
+    if (!fat_cluster_is_valid(dir_cluster)) return FALSE;
 
     last_cluster = dir_cluster;
+    if (max_iter > 8192U) max_iter = 8192U;
     for (;;) {
         next_cluster = fat_next_cluster(last_cluster);
         if (next_cluster < 2) break;
         last_cluster = next_cluster;
+        if (++iter > max_iter) return FALSE;
     }
 
     if (!fat_alloc_chain(1, &new_cluster)) return FALSE;
-    if (new_cluster < 2) return FALSE;
+    if (!fat_cluster_is_valid(new_cluster)) return FALSE;
 
     if (!fat_set_entry(last_cluster, new_cluster)) {
         (void)fat_free_chain(new_cluster);
+        (void)fat_flush_fat_sector();
         return FALSE;
     }
     if (!fat_set_entry(new_cluster, fat_eoc_marker())) {
+        (void)fat_set_entry(last_cluster, fat_eoc_marker());
         (void)fat_free_chain(new_cluster);
+        (void)fat_flush_fat_sector();
         return FALSE;
     }
 
@@ -969,8 +1046,15 @@ static BOOL fat_extend_dir_chain(UINT32 dir_cluster, FAT_DIR_LOC *out_new_loc) {
     lba = fat_cluster_to_lba(new_cluster);
     for (sec_index = 0; sec_index < g_bpb.sec_per_clus; ++sec_index) {
         sima_memclr((char*)g_sector, SECTOR_SIZE);
-        if (!write_sector(lba + sec_index, g_sector)) return FALSE;
+        if (!write_sector(lba + sec_index, g_sector)) {
+            (void)fat_set_entry(last_cluster, fat_eoc_marker());
+            (void)fat_free_chain(new_cluster);
+            (void)fat_flush_fat_sector();
+            return FALSE;
+        }
     }
+
+    if (!fat_flush_fat_sector()) return FALSE;
 
     sima_memclr((char*)out_new_loc, (UINT16)sizeof(FAT_DIR_LOC));
     out_new_loc->root = FALSE;
@@ -1034,9 +1118,9 @@ static BOOL fat_write_cluster_chain(UINT32 first_cluster, const UINT8 *data, UIN
 
     if (size == 0) return TRUE;
     if (!data) return FALSE;
-    if (cluster < 2) return FALSE;
+    if (!fat_cluster_is_valid(cluster)) return FALSE;
 
-    while (cluster >= 2) {
+    while (fat_cluster_is_valid(cluster)) {
         UINT32 sector_lba = fat_cluster_to_lba(cluster);
         UINT8 sector_index;
         for (sector_index = 0; sector_index < g_bpb.sec_per_clus; ++sector_index) {
@@ -1057,6 +1141,47 @@ static BOOL fat_write_cluster_chain(UINT32 first_cluster, const UINT8 *data, UIN
     }
 
     return (remaining == 0);
+}
+
+static BOOL fat_is_dir_empty(UINT32 dir_cluster) {
+    UINT32 cluster;
+    UINT32 iter = 0;
+    UINT32 max_iter = fat_max_cluster();
+
+    /* Never treat errors as \"empty\"; rmdir must be conservative. */
+    if (!fat_cluster_is_valid(dir_cluster)) return FALSE;
+
+    if (max_iter > 8192U) max_iter = 8192U;
+
+    cluster = dir_cluster;
+    while (fat_cluster_is_valid(cluster) && iter <= max_iter) {
+        UINT32 lba = fat_cluster_to_lba(cluster);
+        UINT8 sec_index;
+        for (sec_index = 0; sec_index < g_bpb.sec_per_clus; ++sec_index) {
+            UINT16 entry_index;
+            if (!read_sector(lba + sec_index, g_sector)) return FALSE;
+            for (entry_index = 0; entry_index < (SECTOR_SIZE / 32); ++entry_index) {
+                FAT_DIR_RAW *raw = (FAT_DIR_RAW*)&g_sector[entry_index * 32];
+
+                if (raw->name[0] == 0x00) return TRUE;  /* end marker */
+                if (raw->name[0] == 0xE5) continue;     /* deleted */
+                if (raw->attr == FAT_ATTR_LFN) return FALSE; /* conservative */
+
+                /* Skip dot / dotdot */
+                if (raw->name[0] == '.' && (raw->name[1] == ' ' || (raw->name[1] == '.' && raw->name[2] == ' '))) {
+                    continue;
+                }
+
+                return FALSE; /* any other entry => not empty */
+            }
+        }
+
+        cluster = fat_next_cluster(cluster);
+        ++iter;
+    }
+
+    /* Corrupted chain (cycle) or unexpected termination: do not delete. */
+    return FALSE;
 }
 
 static BOOL fat_find_in_dir(UINT32 dir_cluster, const char *name, FAT_DIR_RAW *out_raw) {
@@ -1225,8 +1350,10 @@ static BOOL fat_resolve_dir(const char *path, UINT32 *out_cluster) {
         if (!(raw.attr & FAT_ATTR_DIRECTORY)) return FALSE;
 
         target_cluster = fat_entry_cluster(&raw);
-        if (target_cluster == 0 && g_fat_type == FAT_TYPE_FAT32) {
-            target_cluster = g_bpb.root_cluster;
+        if (g_fat_type == FAT_TYPE_FAT32) {
+            if (!fat_cluster_is_valid(target_cluster)) return FALSE;
+        } else {
+            if (target_cluster < 2) return FALSE;
         }
         current_cluster = target_cluster;
         cursor = fat_skip_separators(cursor);
@@ -1247,16 +1374,18 @@ static BOOL fat_is_exec_entry(const FAT_DIR_RAW *raw) {
 static BOOL fat_read_file_entry(const FAT_DIR_RAW *raw, UINT8 *out, UINT32 out_cap, UINT32 *out_size) {
     UINT32 cluster;
     UINT32 size;
+    UINT32 file_size;
     UINT32 read_bytes = 0;
     UINT32 cluster_bytes = (UINT32)1 << (g_spc_shift + 9);
 
     if (!raw || !out) return FALSE;
     cluster = fat_entry_cluster(raw);
     size = le32(raw->size);
+    file_size = size;
     if (out_size) *out_size = 0;
-    if (size > 0 && cluster < 2) return FALSE;
+    if (size > 0 && !fat_cluster_is_valid(cluster)) return FALSE;
 
-    while (size > 0 && cluster >= 2) {
+    while (size > 0 && fat_cluster_is_valid(cluster)) {
         UINT32 chunk = (size > cluster_bytes) ? cluster_bytes : size;
         if (read_bytes >= out_cap) break;
         if (chunk > (out_cap - read_bytes)) chunk = out_cap - read_bytes;
@@ -1283,6 +1412,7 @@ static BOOL fat_read_file_entry(const FAT_DIR_RAW *raw, UINT8 *out, UINT32 out_c
     }
 
     if (out_size) *out_size = read_bytes;
+    if (out_cap >= file_size && read_bytes < file_size) return FALSE;
     return TRUE;
 }
 
@@ -1602,6 +1732,34 @@ BOOL fs_delete(const char *name) {
         if (!fat_free_chain(cluster)) return FALSE;
         if (!fat_flush_fat_sector()) return FALSE;
     }
+    return TRUE;
+}
+
+BOOL fs_delete_dir(const char *name) {
+    UINT32 parent_cluster;
+    char leaf[FS_NAME_MAX];
+    FAT_DIR_RAW raw;
+    FAT_DIR_LOC loc;
+    UINT32 dir_cluster;
+
+    if (!fat_resolve_parent_dir(name, &parent_cluster, leaf, (UINT16)sizeof(leaf))) return FALSE;
+    if (!fat_find_in_dir_loc(parent_cluster, leaf, &raw, &loc)) return FALSE;
+    if (!(raw.attr & FAT_ATTR_DIRECTORY)) return FALSE;
+
+    dir_cluster = fat_entry_cluster(&raw);
+    if (dir_cluster < 2) return FALSE;
+    if (fat_is_root_cluster(dir_cluster)) return FALSE;
+    if (dir_cluster == g_cwd_cluster) return FALSE;
+
+    if (!fat_is_dir_empty(dir_cluster)) return FALSE;
+
+    if (!fat_read_entry_at_loc(&loc, &raw)) return FALSE;
+    raw.name[0] = 0xE5;
+    if (!fat_write_entry_at_loc(&loc, &raw)) return FALSE;
+    if (!fat_flush_fat_sector()) return FALSE;
+
+    if (!fat_free_chain(dir_cluster)) return FALSE;
+    if (!fat_flush_fat_sector()) return FALSE;
     return TRUE;
 }
 
