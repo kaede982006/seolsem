@@ -340,6 +340,7 @@ void run_help() {
     print_message("  cls             - Clear screen");
     print_message("  ls [path]       - List files");
     print_message("  cd [path]       - Change directory");
+    print_message("  pwd             - Print working directory");
     print_message("  cat <file>      - Display file contents");
     print_message("  write <file> <data> - Write text to file");
     print_message("  edit <file>     - Open memo editor");
@@ -350,6 +351,40 @@ void run_help() {
     print_message("  exec <file>     - Load and run program");
     print_message("  sync            - Save filesystem to disk (IDE)");
     print_message("  diskinfo        - Show disk size info");
+}
+
+static BOOL cd_expand_user(const char *path, char *out, UINT16 out_cap) {
+    const char *home;
+    const char *rest;
+
+    if (!out || out_cap == 0) return FALSE;
+    out[0] = '\0';
+
+    if (!path) return FALSE;
+    if (path[0] != '~') {
+        return sima_strcpy(out, out_cap, path);
+    }
+
+    home = env_get("HOME");
+    if (!home || home[0] == '\0') {
+        /* No HOME set; keep the original path (e.g., "~" literal). */
+        return sima_strcpy(out, out_cap, path);
+    }
+
+    rest = path + 1; /* skip '~' */
+    /* Support "~" and "~/" only (no ~user). */
+    if (rest[0] != '\0' && rest[0] != '/' && rest[0] != '\\') {
+        return sima_strcpy(out, out_cap, path);
+    }
+
+    if (!sima_strcpy(out, out_cap, home)) return FALSE;
+    if (rest[0] == '\0') return TRUE;
+
+    /* Join carefully to avoid '//' when HOME is '/'. */
+    if (out[0] == '/' && out[1] == '\0') {
+        return sima_strcat(out, out_cap, rest + 1);
+    }
+    return sima_strcat(out, out_cap, rest);
 }
 
 static BOOL run_ls(const char *path) {
@@ -381,16 +416,68 @@ static BOOL run_ls(const char *path) {
     return TRUE;
 }
 
+static BOOL run_pwd(void) {
+    char cwd[FS_PATH_MAX];
+    sima_memclr(cwd, (UINT16)sizeof(cwd));
+    if (!fs_get_cwd(cwd, (UINT16)sizeof(cwd))) {
+        sima_strcpy(cwd, (UINT16)sizeof(cwd), "/");
+    }
+    print_message(cwd);
+    return TRUE;
+}
+
 static BOOL run_cd(const char *path) {
+    char old_path[FS_PATH_MAX];
+    char target[FS_PATH_MAX];
+    const char *home;
+    char new_path[FS_PATH_MAX];
+    static char prev_path[FS_PATH_MAX] = "";
+    static BOOL has_prev = FALSE;
+    BOOL swap_prev = FALSE;
+
+    sima_memclr(old_path, (UINT16)sizeof(old_path));
+    fs_get_cwd(old_path, (UINT16)sizeof(old_path));
+
     if (!path || path[0] == '\0') {
-        if (!fs_cd("/")) {
-            print_simple("Unable to change directory.");
+        home = env_get("HOME");
+        path = (home && home[0] != '\0') ? home : "/";
+    } else if (sima_strcmp(path, "-") == STRC_SAME) {
+        if (!has_prev || prev_path[0] == '\0') {
+            print_simple("No previous directory.");
+            return TRUE;
         }
+        path = prev_path;
+        swap_prev = TRUE;
+    }
+
+    sima_memclr(target, (UINT16)sizeof(target));
+    if (!cd_expand_user(path, target, (UINT16)sizeof(target))) {
+        print_simple("Unable to change directory.");
         return TRUE;
     }
-    if (!fs_cd(path)) {
+
+    if (!fs_cd(target)) {
         print_simple("Directory not found.");
+        return TRUE;
     }
+
+    /* Keep PWD/OLDPWD in sync for Linux-like behavior. */
+    sima_memclr(new_path, (UINT16)sizeof(new_path));
+    if (!fs_get_cwd(new_path, (UINT16)sizeof(new_path))) {
+        sima_strcpy(new_path, (UINT16)sizeof(new_path), "/");
+    }
+    env_set_public("OLDPWD", old_path);
+    env_set_public("PWD", new_path);
+
+    /* Linux-like "cd -" swaps current and previous directories. */
+    if (swap_prev) {
+        sima_strcpy(prev_path, (UINT16)sizeof(prev_path), old_path);
+        has_prev = TRUE;
+        return run_pwd();
+    }
+
+    sima_strcpy(prev_path, (UINT16)sizeof(prev_path), old_path);
+    has_prev = TRUE;
     return TRUE;
 }
 
@@ -640,6 +727,9 @@ BOOL run_buffer(char *buffer)
         if (argc == 2) return run_cd(argv[1]);
         return wrong_command_usage(buffer);
     }
+    if (sima_strcmp(argv[0], "pwd") == STRC_SAME && argc == 1) {
+        return run_pwd();
+    }
     if (sima_strcmp(argv[0], "cat") == STRC_SAME && argc == 2) {
         return run_cat(argv[1]);
     }
@@ -675,6 +765,7 @@ BOOL run_buffer(char *buffer)
         sima_strcmp(argv[0], "cls") == STRC_SAME ||
         sima_strcmp(argv[0], "ls") == STRC_SAME ||
         sima_strcmp(argv[0], "cd") == STRC_SAME ||
+        sima_strcmp(argv[0], "pwd") == STRC_SAME ||
         sima_strcmp(argv[0], "cat") == STRC_SAME ||
         sima_strcmp(argv[0], "write") == STRC_SAME ||
         sima_strcmp(argv[0], "edit") == STRC_SAME ||

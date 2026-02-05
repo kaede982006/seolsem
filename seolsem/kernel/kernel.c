@@ -10,16 +10,34 @@ static char buffer[256];
 
 static void build_prompt(char *out, UINT16 out_cap) {
     char cwd[FS_PATH_MAX];
+    char display[FS_PATH_MAX];
+    const char *home;
 
     sima_memclr(cwd, (UINT16)sizeof(cwd));
     if (!fs_get_cwd(cwd, (UINT16)sizeof(cwd))) {
         sima_strcpy(cwd, (UINT16)sizeof(cwd), "/");
     }
 
+    sima_memclr(display, (UINT16)sizeof(display));
+    home = env_get("HOME");
+    if (home && home[0] != '\0' &&
+        !(home[0] == '/' && home[1] == '\0')) {
+        /* If cwd starts with HOME, display it as ~... (Linux-like prompt). */
+        UINT16 i = 0;
+        while (home[i] != '\0' && cwd[i] == home[i]) ++i;
+        if (home[i] == '\0' && (cwd[i] == '\0' || cwd[i] == '/' || cwd[i] == '\\')) {
+            sima_strcpy(display, (UINT16)sizeof(display), "~");
+            sima_strcat(display, (UINT16)sizeof(display), &cwd[i]);
+        }
+    }
+    if (display[0] == '\0') {
+        sima_strcpy(display, (UINT16)sizeof(display), cwd);
+    }
+
     sima_memclr(out, out_cap);
-    sima_strcpy(out, out_cap, "[drive0]:");
-    sima_strcat(out, out_cap, cwd);
-    sima_strcat(out, out_cap, "$ ");
+    sima_strcpy(out, out_cap, "[");
+    sima_strcat(out, out_cap, display);
+    sima_strcat(out, out_cap, "]$ ");
 }
 
 void kernel_main(void) {

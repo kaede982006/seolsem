@@ -95,6 +95,82 @@ static UINT32 g_count_of_clusters; // Total count of data clusters
 static UINT32 g_cwd_cluster = 0; /* 0 means root directory */
 static char   g_cwd_path[FS_PATH_MAX] = "/";
 
+/* Forward declarations used by prompt path normalization. */
+static UINT8 to_upper(UINT8 ch);
+static const char *fat_skip_separators(const char *cursor);
+static BOOL fat_next_segment(const char **path_cursor, char *segment, UINT16 segment_cap);
+
+static void fs_upper_inplace(char *s) {
+    UINT16 i;
+    if (!s) return;
+    for (i = 0; s[i] != '\0'; ++i) {
+        s[i] = (char)to_upper((UINT8)s[i]);
+    }
+}
+
+static BOOL fs_normalize_path(const char *base_abs, const char *path, char *out, UINT16 out_cap) {
+    /* Build canonical absolute path for prompt/UI purposes only. */
+    enum { FS_MAX_DEPTH = 32 };
+    char segs[FS_MAX_DEPTH][FS_NAME_MAX];
+    UINT16 depth = 0;
+    const char *cursor;
+    char segment[FS_NAME_MAX];
+    UINT16 i;
+
+    if (!out || out_cap == 0) return FALSE;
+    out[0] = '\0';
+
+    if (!base_abs || base_abs[0] == '\0') base_abs = "/";
+    if (!path || path[0] == '\0') {
+        /* Best-effort copy (truncation is acceptable for UI). */
+        (void)sima_strcpy(out, out_cap, base_abs);
+        if (out[0] == '\0') (void)sima_strcpy(out, out_cap, "/");
+        return TRUE;
+    }
+
+    /* If relative, seed from base path */
+    if (!(path[0] == '/' || path[0] == '\\')) {
+        cursor = base_abs;
+        while (fat_next_segment(&cursor, segment, (UINT16)sizeof(segment))) {
+            if (segment[0] == '\0') break;
+            if (depth >= FS_MAX_DEPTH) return FALSE;
+            sima_strcpy(segs[depth], (UINT16)sizeof(segs[depth]), segment);
+            fs_upper_inplace(segs[depth]);
+            ++depth;
+            cursor = fat_skip_separators(cursor);
+        }
+    }
+
+    cursor = path;
+    while (fat_next_segment(&cursor, segment, (UINT16)sizeof(segment))) {
+        if (segment[0] == '.' && segment[1] == '\0') {
+            cursor = fat_skip_separators(cursor);
+            continue;
+        }
+        if (segment[0] == '.' && segment[1] == '.' && segment[2] == '\0') {
+            if (depth > 0) --depth;
+            cursor = fat_skip_separators(cursor);
+            continue;
+        }
+        if (depth >= FS_MAX_DEPTH) return FALSE;
+        sima_strcpy(segs[depth], (UINT16)sizeof(segs[depth]), segment);
+        fs_upper_inplace(segs[depth]);
+        ++depth;
+        cursor = fat_skip_separators(cursor);
+    }
+
+    /* Best-effort build (truncation is acceptable for UI). */
+    (void)sima_strcpy(out, out_cap, "/");
+    for (i = 0; i < depth; ++i) {
+        (void)sima_strcat(out, out_cap, segs[i]);
+        if (i + 1 < depth) {
+            (void)sima_strcat(out, out_cap, "/");
+        }
+    }
+    if (out[0] == '\0') (void)sima_strcpy(out, out_cap, "/");
+    return TRUE;
+}
+
 static UINT16 le16(const UINT8 *p) {
     return (UINT16)(p[0] | ((UINT16)p[1] << 8));
 }
@@ -1219,7 +1295,14 @@ BOOL fs_init(void) {
 
 BOOL fs_cd(const char *path) {
     UINT32 target_cluster;
+    char new_path[FS_PATH_MAX];
+    const char *base_for_rel;
     
+    if (!path || path[0] == '\0' || (path[0] == '.' && path[1] == '\0')) {
+        /* No-op */
+        return TRUE;
+    }
+
     if (path[0] == '/' && path[1] == 0) {
         if (g_fat_type == FAT_TYPE_FAT32) {
             g_cwd_cluster = g_bpb.root_cluster;
@@ -1231,13 +1314,22 @@ BOOL fs_cd(const char *path) {
     }
 
     if (!fat_resolve_dir(path, &target_cluster)) return FALSE;
+    base_for_rel = g_cwd_path;
+    if (!fs_normalize_path(base_for_rel, path, new_path, (UINT16)sizeof(new_path))) {
+        /* Keep cluster change, but fall back to root-style prompt if path is too deep/long. */
+        sima_strcpy(new_path, (UINT16)sizeof(new_path), "/");
+    }
     g_cwd_cluster = target_cluster;
-    /* update path string logic omitted for brevity */
+    sima_strcpy(g_cwd_path, FS_PATH_MAX, new_path);
     return TRUE;
 }
 
 BOOL fs_get_cwd(char *out, UINT16 out_cap) {
-    sima_strcpy(out, out_cap, g_cwd_path);
+    if (!g_cwd_path[0]) {
+        sima_strcpy(out, out_cap, "/");
+    } else {
+        sima_strcpy(out, out_cap, g_cwd_path);
+    }
     return TRUE;
 }
 

@@ -126,3 +126,9 @@ const char *env_get(const char *name) {
     }
     return (const char*)0;
 }
+
+BOOL env_set_public(const char *name, const char *value) {
+    if (!name || !value) return FALSE;
+    env_set(name, value);
+    return TRUE;
+}
