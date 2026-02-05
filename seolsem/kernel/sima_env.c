@@ -95,9 +95,9 @@ static void env_parse_line(char *line) {
 
 BOOL env_init(void) {
     UINT8 buffer[FS_BLOCK_SIZE + 1];
-    UINT16 size = 0;
-    UINT16 i = 0;
-    UINT16 start = 0;
+    UINT32 size = 0;
+    UINT32 i = 0;
+    UINT32 start = 0;
 
     env_clear();
     if (!fs_read("/XENV.ENV", buffer, FS_BLOCK_SIZE, &size)) {
@@ -109,7 +109,7 @@ BOOL env_init(void) {
         if (buffer[i] == '\r') buffer[i] = '\0';
         if (buffer[i] == '\n' || buffer[i] == '\0') {
             env_parse_line((char*)&buffer[start]);
-            start = (UINT16)(i + 1);
+            start = i + 1;
         }
     }
     return TRUE;

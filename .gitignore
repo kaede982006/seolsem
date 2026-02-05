@@ -1,0 +1,17 @@
+# Build outputs
+**/build/
+*.img
+*.qcow2
+*.raw
+*.map
+*.obj
+*.o
+
+# QEMU/QMP artifacts
+*.sock
+*_vram.bin
+
+# Python bytecode
+__pycache__/
+*.pyc
+

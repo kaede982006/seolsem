@@ -208,7 +208,7 @@ def main():
 
     env_data = b"PATH=BIN\r\nHOME=/\r\n"
     hello_data = b"PRINT Hello from Seolsem\r\nEXIT\r\n"
-    memo_data = b"PRINT Edit is read-only on FAT12.\r\nEXIT\r\n"
+    memo_data = b"PRINT Edit is supported on FAT32.\r\nEXIT\r\n"
 
     bin_dir_clusters = alloc_clusters(0, force_one=True)
     kernel_clusters = alloc_clusters(len(kernel))

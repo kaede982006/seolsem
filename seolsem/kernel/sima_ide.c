@@ -76,3 +76,37 @@ BOOL ide_write_sector(UINT32 lba, const UINT8 *buffer) {
     if (io_inb(IDE_STATUS) & IDE_STATUS_ERR) return FALSE;
     return TRUE;
 }
+
+BOOL ide_identify_total_sectors(UINT32 *out_total_sectors) {
+    static UINT16 identify_words[256];
+    UINT8 status;
+    UINT16 lo;
+    UINT16 hi;
+
+    if (!out_total_sectors) return FALSE;
+    if (!ide_wait_ready()) return FALSE;
+
+    /* Select master drive. */
+    io_outb(IDE_HDDEVSEL, 0xA0);
+
+    /* Per ATA spec, clear these registers before IDENTIFY. */
+    io_outb(IDE_SECCOUNT, 0);
+    io_outb(IDE_LBA0, 0);
+    io_outb(IDE_LBA1, 0);
+    io_outb(IDE_LBA2, 0);
+    io_outb(IDE_COMMAND, 0xEC); /* IDENTIFY */
+
+    status = io_inb(IDE_STATUS);
+    if (status == 0) return FALSE;
+
+    if (!ide_wait(IDE_STATUS_BSY, 0, 0xFFFF)) return FALSE;
+    if (io_inb(IDE_STATUS) & IDE_STATUS_ERR) return FALSE;
+    if (!ide_wait_drq()) return FALSE;
+
+    io_insw(IDE_DATA, identify_words, 256);
+
+    lo = identify_words[60];
+    hi = identify_words[61];
+    *out_total_sectors = (UINT32)lo | ((UINT32)hi << 16);
+    return TRUE;
+}

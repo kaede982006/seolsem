@@ -17,6 +17,7 @@ file build/obj/sima_ide.obj
 file build/obj/sima_fs.obj
 file build/obj/sima_program.obj
 file build/obj/sima_env.obj
+file build/obj/math_helpers.obj
 file build/obj/sima_heap.obj
 file build/obj/sima_ioport.obj
 file build/obj/commands.obj

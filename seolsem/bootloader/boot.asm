@@ -38,11 +38,14 @@ boot_start:
     mov sp, 0xFFFE
     mov bp, sp
 
-    ; Load stage2 from reserved sectors (bpbResSectors - 1)
+    ; Load stage2 from reserved sectors.
+    ; Stage2 is stored at LBA (HiddenSectors + 1), for (bpbResSectors - 1) sectors.
     mov ax, [bpbResSectors]
     dec ax
-    mov bx, ax
-    mov ax, 0x02
+    mov bx, ax                    ; count
+
+    mov ax, word [bpbHiddenSecs]  ; start_lba = hidden + 1
+    inc ax
     mov cx, 0x1000
     push ax
     push bx

@@ -29,24 +29,24 @@ static void program_handle_line(const char *line) {
 }
 
 BOOL program_load(const char *name) {
-    UINT16 size;
+    UINT32 size;
     if (!name) return FALSE;
     if (!fs_is_executable(name)) return FALSE;
     if (!fs_read(name, program_buffer, PROGRAM_MAX_SIZE, &size)) return FALSE;
 
-    program_size = size;
+    program_size = (UINT16)size;
     program_buffer[program_size] = '\0';
     program_loaded = TRUE;
     return TRUE;
 }
 
 BOOL program_load_in_dir(const char *dir_name, const char *name) {
-    UINT16 size;
+    UINT32 size;
     if (!dir_name || !name) return FALSE;
     if (!fs_is_executable_in_dir(dir_name, name)) return FALSE;
     if (!fs_read_in_dir(dir_name, name, program_buffer, PROGRAM_MAX_SIZE, &size)) return FALSE;
 
-    program_size = size;
+    program_size = (UINT16)size;
     program_buffer[program_size] = '\0';
     program_loaded = TRUE;
     return TRUE;

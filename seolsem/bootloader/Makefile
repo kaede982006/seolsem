@@ -47,7 +47,7 @@ $(BINDIR)/sima.bin: sima.asm $(KERNEL_IMG) | $(BINDIR)
 	  ENTRY_OFF=$$($(PY) ../kernel/tools/find_entry.py "$(KERNEL_IMG)"); \
 	  ENTRY_REL=$$(( ENTRY_OFF - CODE_BASE )); \
 	  echo "[AS] $<  (KRN_SECT=$$KRN_SECT, DGROUP_DELTA=$$DGROUP_DELTA, CODE_BASE=$$CODE_BASE, CODE_SIZE=$$CODE_SIZE, ENTRY_REL=$$ENTRY_REL)"; \
-	  $(AS) -f bin -D KRN_SECT=$$KRN_SECT -D DGROUP_DELTA=$$DGROUP_DELTA -D CODE_BASE=$$CODE_BASE -D CODE_SIZE=$$CODE_SIZE -D ENTRY_REL=$$ENTRY_REL -o "$@" "$<"
+	  $(AS) -O0 -w-label-redef-late -f bin -D KRN_SECT=$$KRN_SECT -D DGROUP_DELTA=$$DGROUP_DELTA -D CODE_BASE=$$CODE_BASE -D CODE_SIZE=$$CODE_SIZE -D ENTRY_REL=$$ENTRY_REL -o "$@" "$<"
 
 # bootloader.img: 단일 레시피(중복 금지)
 $(IMG): $(BINS) | $(BINDIR)

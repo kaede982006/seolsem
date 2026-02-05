@@ -5,6 +5,7 @@
 #include "sima_io.h"
 #include "sima_program.h"
 #include "sima_env.h"
+#include "sima_ide.h"
 
 static char wrong_command_message[256];
 static char message_buffer[256];
@@ -208,6 +209,96 @@ static void print_simple(const char *text) {
     print_message(message_buffer);
 }
 
+static BOOL run_diskinfo(void) {
+    UINT32 phys_sectors = 0;
+    UINT32 vol_sectors = 0;
+    UINT32 vol_base_lba = 0;
+    UINT8 vol_spc = 0;
+    char line[128];
+
+    print_message("Disk information:");
+
+    if (ide_identify_total_sectors(&phys_sectors)) {
+        UINT16 hi = (UINT16)(phys_sectors >> 16);
+        UINT16 lo = (UINT16)(phys_sectors & 0xFFFF);
+        char hi_s[8];
+        char lo_s[8];
+
+        sima_memclr(hi_s, (UINT16)sizeof(hi_s));
+        sima_memclr(lo_s, (UINT16)sizeof(lo_s));
+        sima_itoh(hi, hi_s, (UINT16)sizeof(hi_s));
+        sima_itoh(lo, lo_s, (UINT16)sizeof(lo_s));
+
+        sima_memclr(line, (UINT16)sizeof(line));
+        sima_strcpy(line, (UINT16)sizeof(line), "  Physical sectors: ");
+        sima_strcat(line, (UINT16)sizeof(line), hi_s);
+        sima_strcat(line, (UINT16)sizeof(line), ":");
+        sima_strcat(line, (UINT16)sizeof(line), lo_s + 2); /* skip "0x" */
+        print_message(line);
+    } else {
+        print_message("  Physical sectors: (ATA IDENTIFY failed)");
+    }
+
+    if (fs_get_volume_info32(&vol_sectors, &vol_spc, &vol_base_lba)) {
+        UINT16 base_hi = (UINT16)(vol_base_lba >> 16);
+        UINT16 base_lo = (UINT16)(vol_base_lba & 0xFFFF);
+        UINT16 vol_hi = (UINT16)(vol_sectors >> 16);
+        UINT16 vol_lo = (UINT16)(vol_sectors & 0xFFFF);
+        UINT16 approx_mib = (UINT16)(vol_sectors >> 11); /* sectors/2048 */
+        char hi_s[8];
+        char lo_s[8];
+        char n1[8];
+        char n2[8];
+        UINT16 cluster_bytes = (UINT16)((UINT16)vol_spc << 9);
+
+        sima_memclr(hi_s, (UINT16)sizeof(hi_s));
+        sima_memclr(lo_s, (UINT16)sizeof(lo_s));
+        sima_itoh(base_hi, hi_s, (UINT16)sizeof(hi_s));
+        sima_itoh(base_lo, lo_s, (UINT16)sizeof(lo_s));
+
+        sima_memclr(line, (UINT16)sizeof(line));
+        sima_strcpy(line, (UINT16)sizeof(line), "  Partition base LBA: ");
+        sima_strcat(line, (UINT16)sizeof(line), hi_s);
+        sima_strcat(line, (UINT16)sizeof(line), ":");
+        sima_strcat(line, (UINT16)sizeof(line), lo_s + 2);
+        print_message(line);
+
+        sima_memclr(hi_s, (UINT16)sizeof(hi_s));
+        sima_memclr(lo_s, (UINT16)sizeof(lo_s));
+        sima_itoh(vol_hi, hi_s, (UINT16)sizeof(hi_s));
+        sima_itoh(vol_lo, lo_s, (UINT16)sizeof(lo_s));
+
+        sima_memclr(n1, (UINT16)sizeof(n1));
+        sima_memclr(n2, (UINT16)sizeof(n2));
+        sima_utoa(approx_mib, n1, (UINT16)sizeof(n1), 10);
+        sima_utoa(cluster_bytes, n2, (UINT16)sizeof(n2), 10);
+
+        sima_memclr(line, (UINT16)sizeof(line));
+        sima_strcpy(line, (UINT16)sizeof(line), "  Volume sectors (BPB): ");
+        sima_strcat(line, (UINT16)sizeof(line), hi_s);
+        sima_strcat(line, (UINT16)sizeof(line), ":");
+        sima_strcat(line, (UINT16)sizeof(line), lo_s + 2);
+        sima_strcat(line, (UINT16)sizeof(line), " (~");
+        sima_strcat(line, (UINT16)sizeof(line), n1);
+        sima_strcat(line, (UINT16)sizeof(line), " MiB)");
+        print_message(line);
+
+        sima_memclr(line, (UINT16)sizeof(line));
+        sima_strcpy(line, (UINT16)sizeof(line), "  Sectors/cluster: ");
+        sima_memclr(n1, (UINT16)sizeof(n1));
+        sima_utoa(vol_spc, n1, (UINT16)sizeof(n1), 10);
+        sima_strcat(line, (UINT16)sizeof(line), n1);
+        sima_strcat(line, (UINT16)sizeof(line), " (");
+        sima_strcat(line, (UINT16)sizeof(line), n2);
+        sima_strcat(line, (UINT16)sizeof(line), " bytes)");
+        print_message(line);
+    } else {
+        print_message("  Volume info (BPB): unavailable");
+    }
+
+    return TRUE;
+}
+
 BOOL wrong_command_usage(char* buffer) {
 	
 	sima_memclr(wrong_command_message, (UINT16)sizeof(wrong_command_message));
@@ -258,6 +349,7 @@ void run_help() {
     print_message("  run             - Run loaded program");
     print_message("  exec <file>     - Load and run program");
     print_message("  sync            - Save filesystem to disk (IDE)");
+    print_message("  diskinfo        - Show disk size info");
 }
 
 static BOOL run_ls(const char *path) {
@@ -304,7 +396,7 @@ static BOOL run_cd(const char *path) {
 
 static BOOL run_cat(const char *name) {
     UINT8 data[FS_BLOCK_SIZE + 1];
-    UINT16 size;
+    UINT32 size;
 
     if (!name) return FALSE;
     if (!fs_read(name, data, FS_BLOCK_SIZE, &size)) {
@@ -321,7 +413,7 @@ static BOOL run_write(const char *name, const char *data) {
     UINT16 size;
     if (!name || !data) return FALSE;
     size = sima_strlen(data);
-    if (!fs_write(name, (const UINT8*)data, size)) {
+    if (!fs_write(name, (const UINT8*)data, (UINT32)size)) {
         print_simple("Unable to write file.");
         return TRUE;
     }
@@ -340,11 +432,11 @@ static BOOL run_edit(const char *name) {
         UINT16 desired_col = 0;
         BOOL modified = FALSE;
         char status[EDIT_COLS + 1];
-        UINT16 read_size = 0;
+        UINT32 read_size = 0;
 
         sima_memclr(buffer, (UINT16)sizeof(buffer));
         if (fs_read(name, (UINT8*)buffer, EDIT_MAX_SIZE, &read_size)) {
-            size = read_size;
+            size = (UINT16)read_size;
             buffer[size] = '\0';
         }
 
@@ -363,7 +455,7 @@ static BOOL run_edit(const char *name) {
             scan = (UINT8)((key >> 8) & 0xFF);
 
             if (ascii == KEY_ESC) {
-                if (!fs_write(name, (const UINT8*)buffer, size)) {
+                if (!fs_write(name, (const UINT8*)buffer, (UINT32)size)) {
                     print_simple("Unable to save memo.");
                     return TRUE;
                 }
@@ -379,7 +471,7 @@ static BOOL run_edit(const char *name) {
             }
 
             if (ascii == KEY_CTRL_S) {
-                if (!fs_write(name, (const UINT8*)buffer, size)) {
+                if (!fs_write(name, (const UINT8*)buffer, (UINT32)size)) {
                     sima_strcpy(status, (UINT16)sizeof(status), "Save failed.");
                 } else {
                     sima_strcpy(status, (UINT16)sizeof(status), "Saved.");
@@ -576,6 +668,9 @@ BOOL run_buffer(char *buffer)
     if (sima_strcmp(argv[0], "sync") == STRC_SAME && argc == 1) {
         return run_sync();
     }
+    if (sima_strcmp(argv[0], "diskinfo") == STRC_SAME && argc == 1) {
+        return run_diskinfo();
+    }
     if (sima_strcmp(argv[0], "help") == STRC_SAME ||
         sima_strcmp(argv[0], "cls") == STRC_SAME ||
         sima_strcmp(argv[0], "ls") == STRC_SAME ||
@@ -588,7 +683,8 @@ BOOL run_buffer(char *buffer)
         sima_strcmp(argv[0], "load") == STRC_SAME ||
         sima_strcmp(argv[0], "run") == STRC_SAME ||
         sima_strcmp(argv[0], "exec") == STRC_SAME ||
-        sima_strcmp(argv[0], "sync") == STRC_SAME) {
+        sima_strcmp(argv[0], "sync") == STRC_SAME ||
+        sima_strcmp(argv[0], "diskinfo") == STRC_SAME) {
         return wrong_command_usage(buffer);
     }
     return FALSE;

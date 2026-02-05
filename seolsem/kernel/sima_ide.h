@@ -5,5 +5,6 @@
 
 BOOL ide_read_sector(UINT32 lba, UINT8 *buffer);
 BOOL ide_write_sector(UINT32 lba, const UINT8 *buffer);
+BOOL ide_identify_total_sectors(UINT32 *out_total_sectors);
 
 #endif
