@@ -7,6 +7,9 @@ import sys
 SECTOR_SIZE = 512
 FAT12_EOC = 0x0FFF
 FAT12_MAX_CLUSTERS = 4084
+SEOLSEM_VOL_ID = 0x534D4C53
+SEOLSEM_BOOT_MAGIC = b'SEOLSIG!'
+SEOLSEM_BOOT_MAGIC_OFS = 0x1F0
 
 
 def le16(value):
@@ -107,6 +110,7 @@ def patch_boot_sector(boot, bpb, label, vol_id):
     write_le32(boot, 0x27, vol_id)
     boot[0x2B:0x36] = label.ljust(11).encode('ascii')
     boot[0x36:0x3E] = b'FAT12   '
+    boot[SEOLSEM_BOOT_MAGIC_OFS:SEOLSEM_BOOT_MAGIC_OFS + len(SEOLSEM_BOOT_MAGIC)] = SEOLSEM_BOOT_MAGIC
 
     boot[510] = 0x55
     boot[511] = 0xAA
@@ -164,7 +168,7 @@ def main():
         'drive_num': args.drive_num,
     }
 
-    patch_boot_sector(boot, bpb, args.label, 0x12345678)
+    patch_boot_sector(boot, bpb, args.label, SEOLSEM_VOL_ID)
 
     image = bytearray(args.total_sectors * SECTOR_SIZE)
     image[0:SECTOR_SIZE] = boot

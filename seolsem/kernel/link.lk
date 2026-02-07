@@ -5,6 +5,11 @@ OPTION NODEFAULTLIBS
 OPTION START=_start
 OPTION MAP=build/bin/kernel.map
 
+# Layout (RAW BIN):
+# - wlink's RAW output omits BSS, and doesn't reliably honor segmented placement (SEGADDR).
+# - After link, we repack the image via tools/pack_kernel_image.py to embed zero-filled BSS
+#   so CODE bytes land at their link-time addresses.
+
 file build/obj/dgroup_marker.obj
 file build/obj/bss_start.obj
 file build/obj/code_marker.obj
@@ -17,6 +22,8 @@ file build/obj/sima_ide.obj
 file build/obj/sima_fs.obj
 file build/obj/sima_program.obj
 file build/obj/sima_env.obj
+file build/obj/sima_user.obj
+file build/obj/sima_perm.obj
 file build/obj/math_helpers.obj
 file build/obj/sima_heap.obj
 file build/obj/sima_ioport.obj

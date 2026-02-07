@@ -9,8 +9,16 @@ section .text
 %define ROOT_BUF_SEG    0x9200
 
 %define ENTRY_OFF (CODE_BASE + ENTRY_REL)
-%define ENTRY_SEG (KERNEL_LOAD_SEG + (ENTRY_OFF >> 4))
-%define ENTRY_IP  (ENTRY_OFF & 0x0F)
+%define KERNEL_BASE_SEG (KERNEL_LOAD_SEG + DGROUP_DELTA)
+
+; Kernel image must fit within a single 64KiB window because:
+; - Stage2 jumps to KERNEL_BASE_SEG:ENTRY_OFF (offset is 16-bit)
+; - Kernel switches to 16-bit protected mode with CS/DS base = image base
+;   and segment limit = 0xFFFF.
+; If this grows beyond 64KiB, the first command execution can GP fault and hang.
+%if (CODE_BASE + CODE_SIZE) > 0x10000
+    %error Kernel image exceeds 64KiB. Reduce size (e.g. optimize for size) or redesign segmentation.
+%endif
 
 jmp 0x1000:start
 
@@ -61,8 +69,6 @@ start:
     call enable_a20
     cld         ; Ensure direction flag is clear for string ops
     call serial_init
-    mov si, msg_sima_start
-    call print_string
 
 
     ; ---- Load BPB from boot sector ----
@@ -178,16 +184,7 @@ start:
     mov [data_start_lba_lo], ax
     mov [data_start_lba_hi], dx
 
-    mov si, msg_bpb_ok
-    call print_string
-    
-    ; Dump Root Start LBA
-    mov ax, [root_start_lba_lo]
-    call print_word_hex
-    mov al, 13
-    call print_char
-    mov al, 10
-    call print_char
+    ; (No banner/progress prints in normal boot path; keep output for errors only.)
 
 .read_root:
 
@@ -220,8 +217,6 @@ start:
     call read_sectors_lba
     
     ; Load Fixed Root Directory
-    mov si, msg_root_load
-    call print_string
     mov ax, ROOT_BUF_SEG
 
     mov es, ax
@@ -232,8 +227,6 @@ start:
     call read_sectors_lba
 
     ; ---- Find KERNEL.BIN ----
-    mov si, msg_kernel_search
-    call print_string
     mov ax, ROOT_BUF_SEG
     mov es, ax
     xor di, di
@@ -241,8 +234,6 @@ start:
     jmp .find_kernel
 
 .fat32_root_load:
-    mov si, msg_root_load
-    call print_string
     ; FAT32: Root Dir is a cluster chain.
 
     ; We treat it like a file. Load it to ROOT_BUF_SEG.
@@ -261,8 +252,6 @@ start:
 
 
     ; ---- Find KERNEL.BIN ----
-    mov si, msg_kernel_search
-    call print_string
     mov ax, ROOT_BUF_SEG
 
     mov es, ax
@@ -326,39 +315,15 @@ kernel_not_found:
 
 kernel_found:
     xor eax, eax
-    mov ax, [es:di+26]
-    mov word [cur_cluster], ax ; Low 16
-    mov word [cur_cluster+2], ax ; High 16? No. FAT32 high word is at +20 (0x14).
-    ; Wait, Directory Entry:
-    ; 0x1A (26): First Cluster Low
-    ; 0x14 (20): First Cluster High (FAT32)
-    ; I must read High word too!
-    
-    mov ax, [es:di+20]
+    mov ax, [es:di+20]      ; FirstClusterHigh (FAT32)
     shl eax, 16
-    mov ax, [es:di+26]
+    mov ax, [es:di+26]      ; FirstClusterLow
     mov [cur_cluster], eax
 
     mov ax, [es:di+28]
     mov [kernel_size_low], ax
     mov ax, [es:di+30]
     mov [kernel_size_high], ax
-
-    ; Debug: print size(low) and start cluster(low)
-    push cs
-    pop ds
-    mov al, 'S'
-    call print_char
-    mov ax, [kernel_size_low]
-    call print_word_hex
-    mov al, 'C'
-    call print_char
-    mov ax, [cur_cluster]
-    call print_word_hex
-    mov al, 13
-    call print_char
-    mov al, 10
-    call print_char
 
     ; ---- Load kernel file ----
     mov ax, KERNEL_LOAD_SEG
@@ -369,14 +334,6 @@ kernel_found:
     mov dx, [kernel_size_high]
     or ax, dx
     jz kernel_loaded
-
-    ; Debug: print current cluster (low word)
-    push cs
-    pop ds
-    mov ax, [cur_cluster]
-    call print_word_hex
-    mov al, ' '
-    call print_char
 
     mov eax, [cur_cluster]
     mov [cur_cluster_orig], eax
@@ -455,9 +412,9 @@ kernel_found:
 
 kernel_loaded:
     ; Verify entry opcode at loaded location (expect 0xEB)
-    mov ax, ENTRY_SEG
+    mov ax, KERNEL_BASE_SEG
     mov ds, ax
-    mov si, ENTRY_IP
+    mov si, ENTRY_OFF
     mov al, [ds:si]
     cmp al, 0xEB
     je .entry_ok
@@ -474,20 +431,12 @@ kernel_loaded:
     call print_char
     jmp $
 .entry_ok:
-
-    ; Confirm we reached the verified kernel entry point (useful for -nographic debugging).
-    push cs
-    pop ds
-    mov si, msg_kernel_jump
-    call print_string
-
     ; Set DS/ES to DGROUP and jump to kernel entry
-    mov ax, KERNEL_LOAD_SEG
-    add ax, DGROUP_DELTA
+    mov ax, KERNEL_BASE_SEG
     mov ds, ax
     mov es, ax
 
-    jmp ENTRY_SEG:ENTRY_IP
+    jmp KERNEL_BASE_SEG:ENTRY_OFF
 
 ; --------------------
 ; FAT12 helpers
@@ -615,10 +564,9 @@ read_sectors_lba:
     mov ax, [bpb_bytes_per_sec]
     add bx, ax
     jnc .no_wrap
+    ; BX wrapped past 0xFFFF -> advance ES by 64KiB (0x10000 bytes).
     mov ax, es
-    mov dx, [bpb_bytes_per_sec]
-    shr dx, 4
-    add ax, dx
+    add ax, 0x1000
     mov es, ax
 .no_wrap:
 
@@ -782,6 +730,7 @@ print_char:
     push bx
     push ds
     push dx
+    push es
     push ax
     
     ; BIOS Output
@@ -804,6 +753,7 @@ print_char:
     push ax ; balance stack
     
     pop ax
+    pop es
     pop dx
     pop ds
     pop bx

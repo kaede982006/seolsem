@@ -94,6 +94,7 @@ static UINT32 g_count_of_clusters; // Total count of data clusters
 
 static UINT32 g_cwd_cluster = 0; /* 0 means root directory */
 static char   g_cwd_path[FS_PATH_MAX] = "/";
+static BOOL   g_fs_ready = FALSE;
 
 /* Forward declarations used by prompt path normalization. */
 static UINT8 to_upper(UINT8 ch);
@@ -198,11 +199,28 @@ static UINT8 to_upper(UINT8 ch) {
     return ch;
 }
 
+static BOOL fs_is_ready(void) {
+    if (!g_fs_ready) return FALSE;
+    if (g_fat_type == FAT_TYPE_UNKNOWN) return FALSE;
+    if (g_total_sectors == 0) return FALSE;
+    return TRUE;
+}
+
+static BOOL lba_in_volume(UINT32 lba) {
+    if (g_total_sectors == 0) return TRUE; /* During fs_init probing */
+    if (lba < g_base_lba) return FALSE;
+    return ((lba - g_base_lba) < g_total_sectors) ? TRUE : FALSE;
+}
+
 static BOOL read_sector(UINT32 lba, UINT8 *buf) {
+    if (!buf) return FALSE;
+    if (!lba_in_volume(lba)) return FALSE;
     return ide_read_sector(lba, buf);
 }
 
 static BOOL write_sector(UINT32 lba, const UINT8 *buf) {
+    if (!buf) return FALSE;
+    if (!lba_in_volume(lba)) return FALSE;
     return ide_write_sector(lba, buf);
 }
 
@@ -349,6 +367,8 @@ static BOOL fat_load_bpb(void) {
         g_sectors_per_fat = g_bpb.fat_secs32;
     }
 
+    if (g_bpb.fats == 0 || g_bpb.res_sectors == 0 || g_sectors_per_fat == 0) return FALSE;
+
     g_root_dir_sectors = ((UINT32)g_bpb.root_ents * 32U + (UINT32)(SECTOR_SIZE - 1)) / (UINT32)SECTOR_SIZE;
 
     g_fat_start_lba = g_base_lba + g_bpb.res_sectors;
@@ -356,7 +376,13 @@ static BOOL fat_load_bpb(void) {
     g_data_start_lba = g_root_start_lba + g_root_dir_sectors;
 
     {
-        UINT32 data_sectors = g_total_sectors - (g_data_start_lba - g_base_lba);
+        UINT32 layout_sectors;
+        UINT32 data_sectors;
+        if (g_data_start_lba < g_base_lba) return FALSE;
+        layout_sectors = g_data_start_lba - g_base_lba;
+        if (layout_sectors >= g_total_sectors) return FALSE;
+        data_sectors = g_total_sectors - layout_sectors;
+        if (data_sectors == 0) return FALSE;
         g_count_of_clusters = data_sectors >> g_spc_shift;
     }
 
@@ -537,7 +563,8 @@ static BOOL fat_read_cluster_entry(UINT32 cluster, UINT32 offset, FAT_DIR_RAW *o
  */
 static BOOL fat_dir_read_raw(FS_DIR *dir, FAT_DIR_RAW *out) {
     UINT32 cluster_guard_limit = fat_max_cluster();
-    if (cluster_guard_limit > 8192U) cluster_guard_limit = 8192U;
+    if (cluster_guard_limit > 64U) cluster_guard_limit = 64U;
+    if (cluster_guard_limit < 8U) cluster_guard_limit = 8U;
 
     if (!dir || !out) return FALSE;
     if (dir->error) return FALSE;
@@ -566,6 +593,10 @@ static BOOL fat_dir_read_raw(FS_DIR *dir, FAT_DIR_RAW *out) {
                 UINT32 next_cluster = fat_next_cluster(dir->cur_cluster);
                 dir->offset = 0;
                 if (next_cluster < 2) return FALSE;
+                if (next_cluster == dir->cur_cluster) {
+                    dir->error = TRUE;
+                    return FALSE;
+                }
                 dir->cur_cluster = next_cluster;
                 dir->guard_clusters++;
                 if (dir->guard_clusters > cluster_guard_limit) {
@@ -1419,7 +1450,21 @@ static BOOL fat_read_file_entry(const FAT_DIR_RAW *raw, UINT8 *out, UINT32 out_c
 /* Public API */
 
 BOOL fs_init(void) {
+    g_fs_ready = FALSE;
+    g_fat_type = FAT_TYPE_UNKNOWN;
+    g_base_lba = 0;
+    g_spc_shift = 0;
+    g_fat_start_lba = 0;
+    g_root_start_lba = 0;
+    g_data_start_lba = 0;
+    g_total_sectors = 0;
+    g_sectors_per_fat = 0;
+    g_root_dir_sectors = 0;
+    g_count_of_clusters = 0;
+    g_cwd_cluster = 0;
+    sima_strcpy(g_cwd_path, FS_PATH_MAX, "/");
     if (!fat_load_bpb()) return FALSE;
+    g_fs_ready = TRUE;
     return TRUE;
 }
 
@@ -1428,6 +1473,7 @@ BOOL fs_cd(const char *path) {
     char new_path[FS_PATH_MAX];
     const char *base_for_rel;
     
+    if (!fs_is_ready()) return FALSE;
     if (!path || path[0] == '\0' || (path[0] == '.' && path[1] == '\0')) {
         /* No-op */
         return TRUE;
@@ -1463,8 +1509,19 @@ BOOL fs_get_cwd(char *out, UINT16 out_cap) {
     return TRUE;
 }
 
+BOOL fs_make_abs_path(const char *path, char *out, UINT16 out_cap) {
+    const char *base;
+    if (!fs_is_ready()) return FALSE;
+    if (!out || out_cap == 0) return FALSE;
+    base = g_cwd_path;
+    if (!base || base[0] == '\0') base = "/";
+    if (!path || path[0] == '\0') path = ".";
+    return fs_normalize_path(base, path, out, out_cap);
+}
+
 BOOL fs_dir_open(const char *path, FS_DIR *out_dir) {
     UINT32 target_cluster;
+    if (!fs_is_ready()) return FALSE;
     if (!out_dir) return FALSE;
     sima_memclr((void*)out_dir, (UINT16)sizeof(FS_DIR));
 
@@ -1505,6 +1562,7 @@ BOOL fs_dir_open(const char *path, FS_DIR *out_dir) {
 
 BOOL fs_dir_read(FS_DIR *dir, FS_DIRENT *out) {
     FAT_DIR_RAW raw;
+    if (!fs_is_ready()) return FALSE;
     if (!fat_dir_read_raw(dir, &raw)) return FALSE;
 
     fat_format_name(&raw, out->name, FS_NAME_MAX);
@@ -1521,6 +1579,7 @@ BOOL fs_dir_read(FS_DIR *dir, FS_DIRENT *out) {
 
 BOOL fs_read(const char *path, UINT8 *out, UINT32 out_cap, UINT32 *out_size) {
     FAT_DIR_RAW raw;
+    if (!fs_is_ready()) return FALSE;
     if (!fat_resolve_path(path, &raw)) return FALSE;
     if (raw.attr & FAT_ATTR_DIRECTORY) return FALSE;
     return fat_read_file_entry(&raw, out, out_cap, out_size);
@@ -1693,6 +1752,7 @@ BOOL fs_create_dir(const char *name) {
     UINT32 dir_cluster;
     char leaf[FS_NAME_MAX];
 
+    if (!fs_is_ready()) return FALSE;
     if (!fat_resolve_parent_dir(name, &dir_cluster, leaf, (UINT16)sizeof(leaf))) return FALSE;
     return fat_create_dir_in_dir(dir_cluster, leaf);
 }
@@ -1701,12 +1761,14 @@ BOOL fs_write(const char *name, const UINT8 *data, UINT32 size) {
     UINT32 dir_cluster;
     char leaf[FS_NAME_MAX];
 
+    if (!fs_is_ready()) return FALSE;
     if (!fat_resolve_parent_dir(name, &dir_cluster, leaf, (UINT16)sizeof(leaf))) return FALSE;
     return fat_write_file_in_dir(dir_cluster, leaf, data, size);
 }
 
 BOOL fs_write_in_dir(const char *dir_name, const char *name, const UINT8 *data, UINT32 size) {
     UINT32 dir_cluster;
+    if (!fs_is_ready()) return FALSE;
     if (!dir_name || !name) return FALSE;
     if (!fat_resolve_dir(dir_name, &dir_cluster)) return FALSE;
     return fat_write_file_in_dir(dir_cluster, name, data, size);
@@ -1719,6 +1781,7 @@ BOOL fs_delete(const char *name) {
     FAT_DIR_LOC loc;
     UINT32 cluster;
 
+    if (!fs_is_ready()) return FALSE;
     if (!fat_resolve_parent_dir(name, &dir_cluster, leaf, (UINT16)sizeof(leaf))) return FALSE;
     if (!fat_find_in_dir_loc(dir_cluster, leaf, &raw, &loc)) return FALSE;
     if (raw.attr & FAT_ATTR_DIRECTORY) return FALSE;
@@ -1742,6 +1805,7 @@ BOOL fs_delete_dir(const char *name) {
     FAT_DIR_LOC loc;
     UINT32 dir_cluster;
 
+    if (!fs_is_ready()) return FALSE;
     if (!fat_resolve_parent_dir(name, &parent_cluster, leaf, (UINT16)sizeof(leaf))) return FALSE;
     if (!fat_find_in_dir_loc(parent_cluster, leaf, &raw, &loc)) return FALSE;
     if (!(raw.attr & FAT_ATTR_DIRECTORY)) return FALSE;
@@ -1763,15 +1827,20 @@ BOOL fs_delete_dir(const char *name) {
     return TRUE;
 }
 
-BOOL fs_sync(void) { return fat_flush_fat_sector(); }
+BOOL fs_sync(void) {
+    if (!fs_is_ready()) return FALSE;
+    return fat_flush_fat_sector();
+}
 
 BOOL fs_get_volume_info(UINT32 *out_total_sectors, UINT8 *out_sec_per_clus) {
+    if (!fs_is_ready()) return FALSE;
     if (out_total_sectors) *out_total_sectors = g_total_sectors;
     if (out_sec_per_clus) *out_sec_per_clus = g_bpb.sec_per_clus;
     return TRUE;
 }
 
 BOOL fs_get_volume_info32(UINT32 *out_total_sectors, UINT8 *out_sec_per_clus, UINT32 *out_base_lba) {
+    if (!fs_is_ready()) return FALSE;
     if (out_total_sectors) *out_total_sectors = g_total_sectors;
     if (out_sec_per_clus) *out_sec_per_clus = g_bpb.sec_per_clus;
     if (out_base_lba) *out_base_lba = g_base_lba;
@@ -1783,6 +1852,7 @@ BOOL fs_read_in_dir(const char *dir_name, const char *name, UINT8 *out, UINT32 o
     UINT32 dir_cluster;
     FAT_DIR_RAW raw;
 
+    if (!fs_is_ready()) return FALSE;
     if (!dir_name || !name) return FALSE;
     if (!fat_resolve_dir(dir_name, &dir_cluster)) return FALSE;
     if (!fat_find_in_dir(dir_cluster, name, &raw)) return FALSE;
@@ -1792,6 +1862,7 @@ BOOL fs_read_in_dir(const char *dir_name, const char *name, UINT8 *out, UINT32 o
 
 BOOL fs_is_executable(const char *path) {
     FAT_DIR_RAW raw;
+    if (!fs_is_ready()) return FALSE;
     if (!fat_resolve_path(path, &raw)) return FALSE;
     if (raw.attr & FAT_ATTR_DIRECTORY) return FALSE;
     return fat_is_exec_entry(&raw);
@@ -1801,6 +1872,7 @@ BOOL fs_is_executable_in_dir(const char *dir_name, const char *name) {
     UINT32 dir_cluster;
     FAT_DIR_RAW raw;
 
+    if (!fs_is_ready()) return FALSE;
     if (!dir_name || !name) return FALSE;
     if (!fat_resolve_dir(dir_name, &dir_cluster)) return FALSE;
     if (!fat_find_in_dir(dir_cluster, name, &raw)) return FALSE;
@@ -1810,5 +1882,6 @@ BOOL fs_is_executable_in_dir(const char *dir_name, const char *name) {
 
 BOOL fs_is_dir(const char *path) { 
     UINT32 cluster;
+    if (!fs_is_ready()) return FALSE;
     return fat_resolve_dir(path, &cluster);
 }

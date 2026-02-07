@@ -6,9 +6,12 @@
 #include "sima_program.h"
 #include "sima_env.h"
 #include "sima_ide.h"
+#include "sima_user.h"
+#include "sima_perm.h"
 
 static char wrong_command_message[256];
 static char message_buffer[256];
+static void print_simple(const char *text);
 
 #define EDIT_COLS 80
 #define EDIT_ROWS 23
@@ -203,6 +206,93 @@ static const char* skip_tokens(const char *buffer, UINT16 count) {
     return &buffer[i];
 }
 
+static BOOL is_space_char(char ch) {
+    return (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n');
+}
+
+/* Minimal Linux-like argv parser:
+ * - Splits on spaces/tabs
+ * - Supports single/double quotes to include spaces
+ * - Treats backslash as an escape ONLY for whitespace and quotes (so paths like "U\\A" keep the '\\')
+ * - Edits the input buffer in-place and writes tokens back into it (dst <= src).
+ */
+static UINT16 parse_argv(char *line, char **argv, UINT16 argv_cap) {
+    UINT16 argc = 0;
+    char *src;
+    char *dst;
+
+    BOOL in_single = FALSE;
+    BOOL in_double = FALSE;
+
+    if (!line || !argv || argv_cap == 0) return 0;
+    src = line;
+    dst = line;
+
+    while (*src != '\0') {
+        while (is_space_char(*src)) ++src;
+        if (*src == '\0') break;
+        if (argc >= argv_cap) break;
+
+        argv[argc++] = dst;
+        in_single = FALSE;
+        in_double = FALSE;
+
+        while (*src != '\0') {
+            char ch = *src;
+            if (!in_single && !in_double && is_space_char(ch)) {
+                /* Consume the delimiter so dst==src in-place parsing keeps progressing. */
+                ++src;
+                break;
+            }
+
+            ++src;
+            if (!in_double && ch == '\'') {
+                in_single = (BOOL)!in_single;
+                continue;
+            }
+            if (!in_single && ch == '"') {
+                in_double = (BOOL)!in_double;
+                continue;
+            }
+
+            if (!in_single && ch == '\\') {
+                char next = *src;
+                if (next == ' ' || next == '\t' || next == '\\' || next == '"' || next == '\'') {
+                    if (next != '\0') {
+                        ch = next;
+                        ++src;
+                    }
+                }
+            }
+
+            *dst++ = ch;
+        }
+
+        *dst++ = '\0';
+        while (is_space_char(*src)) ++src;
+    }
+
+    return argc;
+}
+
+/* Moved to sima_perm.c as perm_is_root() */
+
+/* Permission helper (now uses sima_perm.c) */
+static BOOL deny_if_forbidden(const char *path, BOOL allow_bin) {
+    if (perm_allow_path(path, allow_bin)) return FALSE;
+    print_simple("Permission denied.");
+    return TRUE;
+}
+
+static BOOL has_path_separator(const char *path) {
+    if (!path) return FALSE;
+    while (*path) {
+        if (*path == '/' || *path == '\\') return TRUE;
+        ++path;
+    }
+    return FALSE;
+}
+
 static void print_simple(const char *text) {
     sima_memclr(message_buffer, (UINT16)sizeof(message_buffer));
     sima_strcpy(message_buffer, (UINT16)sizeof(message_buffer), text);
@@ -333,25 +423,194 @@ static BOOL load_program_with_path(const char *name) {
     return FALSE;
 }
 
+static UINT8 man_upper(UINT8 ch) {
+    if (ch >= 'a' && ch <= 'z') return (UINT8)(ch - 'a' + 'A');
+    return ch;
+}
+
+static BOOL man_topic_eq(const char *lhs, const char *rhs) {
+    UINT16 i = 0;
+    if (!lhs || !rhs) return FALSE;
+    while (lhs[i] != '\0' && rhs[i] != '\0') {
+        if (man_upper((UINT8)lhs[i]) != man_upper((UINT8)rhs[i])) return FALSE;
+        ++i;
+    }
+    return (lhs[i] == '\0' && rhs[i] == '\0') ? TRUE : FALSE;
+}
+
+static BOOL man_wait_next(void) {
+    for (;;) {
+        UINT16 key = read_key();
+        UINT8 ascii = (UINT8)(key & 0xFF);
+        if (ascii == 'q' || ascii == 'Q' || ascii == 27) return FALSE;
+        if (ascii == ' ' || ascii == 13) return TRUE;
+    }
+}
+
+static BOOL man_show_page(const char *title, const char *const *lines, UINT16 line_count) {
+    UINT16 index = 0;
+    const UINT16 body_lines = 18;
+
+    while (index < line_count) {
+        UINT16 shown = 0;
+        clear_screen();
+        print_message("Seolsem Manual");
+        print_message(title);
+        print_message("");
+        while (index < line_count && shown < body_lines) {
+            print_message(lines[index]);
+            ++index;
+            ++shown;
+        }
+        if (index >= line_count) break;
+        print_message("");
+        print_message("[SPACE/ENTER] next  [Q/ESC] quit");
+        if (!man_wait_next()) return TRUE;
+    }
+    return TRUE;
+}
+
+static BOOL run_man(const char *topic) {
+    static const char *const man_index[] = {
+        "Usage:",
+        "  man <topic>",
+        "  help <topic>",
+        "",
+        "Main topics:",
+        "  system  fs  exec  user  display",
+        "",
+        "Command topics:",
+        "  ls cd pwd cat write edit rm rmdir mkdir",
+        "  load run exec sync diskinfo",
+        "  whoami id users useradd login su passwd",
+        "",
+        "Examples:",
+        "  man fs",
+        "  man exec",
+        "  man cd"
+    };
+    static const char *const man_system[] = {
+        "system:",
+        "  ver             show OS version",
+        "  help [topic]    show manual index/page",
+        "  man [topic]     show manual page",
+        "  diskinfo        show disk and volume info",
+        "",
+        "Notes:",
+        "  - command args support quotes",
+        "  - path and permission checks are Linux-like"
+    };
+    static const char *const man_fs[] = {
+        "fs:",
+        "  ls [path]       list directory entries",
+        "  cd [path]       change directory",
+        "  cd -            jump to previous directory",
+        "  pwd             print working directory",
+        "  cat <file>      print file content",
+        "  write <f> <txt> create/overwrite file",
+        "  edit <file>     open text editor",
+        "  rm <file>       delete file",
+        "  rmdir <dir>     remove empty directory",
+        "  mkdir <dir>     create directory",
+        "  sync            flush cached FAT sectors",
+        "",
+        "Path tips:",
+        "  - absolute: /BIN/HELLO.PRG",
+        "  - relative: ./memo.txt  ../",
+        "  - home: ~/notes.txt",
+        "  - non-root users are limited by policy"
+    };
+    static const char *const man_exec[] = {
+        "exec:",
+        "  load <file>     load .PRG script into memory",
+        "  run             run currently loaded program",
+        "  exec <file>     load and run immediately",
+        "",
+        "Program format:",
+        "  PRINT <text>",
+        "  CLS",
+        "  EXIT",
+        "",
+        "Search path:",
+        "  - current directory first",
+        "  - then PATH entries (default BIN)"
+    };
+    static const char *const man_user[] = {
+        "user:",
+        "  whoami          print current user",
+        "  id              print current uid",
+        "  users           list users",
+        "  useradd <n> [p] add user (root only)",
+        "  login <n> [p]   switch user",
+        "  su <n> [p]      alias of login",
+        "  passwd          change your password",
+        "",
+        "Default rules:",
+        "  - root uid is 0",
+        "  - user homes are under /HOME/<NAME>",
+        "  - /ETC/PASSWD is source of truth"
+    };
+    static const char *const man_display[] = {
+        "display:",
+        "  cls             clear text screen",
+        "",
+        "Editor keys:",
+        "  Ctrl+S          save",
+        "  Esc             save and exit",
+        "  Ctrl+Q          quit without saving",
+        "  Arrow/Home/End/Delete supported"
+    };
+    static const char *const man_cd[] = {
+        "cd:",
+        "  cd              move to HOME",
+        "  cd /            move to root",
+        "  cd -            move to previous directory",
+        "  cd <path>       move to path",
+        "",
+        "Examples:",
+        "  cd /BIN",
+        "  cd ..",
+        "  cd ~/DOCS"
+    };
+
+    if (!topic || topic[0] == '\0') {
+        return man_show_page("Index", man_index, (UINT16)(sizeof(man_index) / sizeof(man_index[0])));
+    }
+
+    if (man_topic_eq(topic, "HELP") || man_topic_eq(topic, "MAN")) {
+        return man_show_page("Index", man_index, (UINT16)(sizeof(man_index) / sizeof(man_index[0])));
+    }
+    if (man_topic_eq(topic, "SYSTEM") || man_topic_eq(topic, "VER") || man_topic_eq(topic, "DISKINFO")) {
+        return man_show_page("System", man_system, (UINT16)(sizeof(man_system) / sizeof(man_system[0])));
+    }
+    if (man_topic_eq(topic, "FS") || man_topic_eq(topic, "LS") || man_topic_eq(topic, "PWD") ||
+        man_topic_eq(topic, "CAT") || man_topic_eq(topic, "WRITE") || man_topic_eq(topic, "EDIT") ||
+        man_topic_eq(topic, "RM") || man_topic_eq(topic, "RMDIR") || man_topic_eq(topic, "MKDIR") ||
+        man_topic_eq(topic, "SYNC")) {
+        return man_show_page("Filesystem", man_fs, (UINT16)(sizeof(man_fs) / sizeof(man_fs[0])));
+    }
+    if (man_topic_eq(topic, "CD")) {
+        return man_show_page("cd", man_cd, (UINT16)(sizeof(man_cd) / sizeof(man_cd[0])));
+    }
+    if (man_topic_eq(topic, "EXEC") || man_topic_eq(topic, "LOAD") || man_topic_eq(topic, "RUN")) {
+        return man_show_page("Program Execution", man_exec, (UINT16)(sizeof(man_exec) / sizeof(man_exec[0])));
+    }
+    if (man_topic_eq(topic, "USER") || man_topic_eq(topic, "WHOAMI") || man_topic_eq(topic, "ID") ||
+        man_topic_eq(topic, "USERS") || man_topic_eq(topic, "USERADD") ||
+        man_topic_eq(topic, "LOGIN") || man_topic_eq(topic, "SU") ||
+        man_topic_eq(topic, "PASSWD")) {
+        return man_show_page("User", man_user, (UINT16)(sizeof(man_user) / sizeof(man_user[0])));
+    }
+    if (man_topic_eq(topic, "DISPLAY") || man_topic_eq(topic, "CLS")) {
+        return man_show_page("Display", man_display, (UINT16)(sizeof(man_display) / sizeof(man_display[0])));
+    }
+
+    print_simple("No manual entry. Try: man");
+    return TRUE;
+}
+
 void run_help() {
-    print_message("Available commands:");
-    print_message("  ver             - Show OS version");
-    print_message("  help            - Show this help");
-    print_message("  cls             - Clear screen");
-    print_message("  ls [path]       - List files");
-    print_message("  cd [path]       - Change directory");
-    print_message("  pwd             - Print working directory");
-    print_message("  cat <file>      - Display file contents");
-    print_message("  write <file> <data> - Write text to file");
-    print_message("  edit <file>     - Open memo editor");
-    print_message("  rm <file>       - Delete file");
-    print_message("  rmdir <dir>     - Remove empty directory");
-    print_message("  mkdir <dir>     - Create directory");
-    print_message("  load <file>     - Load program to memory");
-    print_message("  run             - Run loaded program");
-    print_message("  exec <file>     - Load and run program");
-    print_message("  sync            - Save filesystem to disk (IDE)");
-    print_message("  diskinfo        - Show disk size info");
+    (void)run_man((const char*)0);
 }
 
 static BOOL cd_expand_user(const char *path, char *out, UINT16 out_cap) {
@@ -392,6 +651,9 @@ static BOOL run_ls(const char *path) {
     FS_DIR dir;
     FS_DIRENT entry;
     char size_buffer[16];
+    UINT16 guard = 0;
+
+    if (deny_if_forbidden(path && path[0] ? path : ".", FALSE)) return TRUE;
 
     if (!fs_dir_open(path && path[0] ? path : ".", &dir)) {
         print_simple("Path not found.");
@@ -399,6 +661,10 @@ static BOOL run_ls(const char *path) {
     }
 
     while (fs_dir_read(&dir, &entry)) {
+        if (++guard > 256U) {
+            print_simple("Directory listing aborted.");
+            break;
+        }
         sima_memclr(message_buffer, (UINT16)sizeof(message_buffer));
         sima_strcpy(message_buffer, (UINT16)sizeof(message_buffer), entry.name);
         if (entry.is_dir) {
@@ -456,6 +722,7 @@ static BOOL run_cd(const char *path) {
         print_simple("Unable to change directory.");
         return TRUE;
     }
+    if (deny_if_forbidden(target, FALSE)) return TRUE;
 
     if (!fs_cd(target)) {
         print_simple("Directory not found.");
@@ -487,6 +754,7 @@ static BOOL run_cat(const char *name) {
     UINT32 size;
 
     if (!name) return FALSE;
+    if (deny_if_forbidden(name, FALSE)) return TRUE;
     if (!fs_read(name, data, FS_BLOCK_SIZE, &size)) {
         print_simple("Unable to read file.");
         return TRUE;
@@ -500,6 +768,7 @@ static BOOL run_cat(const char *name) {
 static BOOL run_write(const char *name, const char *data) {
     UINT16 size;
     if (!name || !data) return FALSE;
+    if (deny_if_forbidden(name, FALSE)) return TRUE;
     size = sima_strlen(data);
     if (!fs_write(name, (const UINT8*)data, (UINT32)size)) {
         print_simple("Unable to write file.");
@@ -511,6 +780,7 @@ static BOOL run_write(const char *name, const char *data) {
 
 static BOOL run_edit(const char *name) {
     if (!name) return FALSE;
+    if (deny_if_forbidden(name, FALSE)) return TRUE;
 
     {
         char buffer[EDIT_MAX_SIZE + 1];
@@ -635,6 +905,7 @@ static BOOL run_edit(const char *name) {
 
 static BOOL run_rm(const char *name) {
     if (!name) return FALSE;
+    if (deny_if_forbidden(name, FALSE)) return TRUE;
     if (!fs_delete(name)) {
         print_simple("Unable to delete file.");
         return TRUE;
@@ -645,6 +916,7 @@ static BOOL run_rm(const char *name) {
 
 static BOOL run_rmdir(const char *name) {
     if (!name) return FALSE;
+    if (deny_if_forbidden(name, FALSE)) return TRUE;
     if (!fs_delete_dir(name)) {
         print_simple("Unable to remove directory.");
         return TRUE;
@@ -655,6 +927,7 @@ static BOOL run_rmdir(const char *name) {
 
 static BOOL run_mkdir(const char *name) {
     if (!name) return FALSE;
+    if (deny_if_forbidden(name, FALSE)) return TRUE;
     if (!fs_create_dir(name)) {
         print_simple("Unable to create directory.");
         return TRUE;
@@ -665,6 +938,11 @@ static BOOL run_mkdir(const char *name) {
 
 static BOOL run_load(const char *name) {
     if (!name) return FALSE;
+    if (!perm_is_root() && has_path_separator(name) && deny_if_forbidden(name, TRUE)) return TRUE;
+    if (!perm_check(name, PERM_OP_READ | PERM_OP_EXEC)) {
+        print_simple("Permission denied.");
+        return TRUE;
+    }
     if (!load_program_with_path(name)) {
         print_simple("Unable to load program.");
         return TRUE;
@@ -682,6 +960,12 @@ static BOOL run_program(void) {
 }
 
 static BOOL run_exec(const char *name) {
+    if (!name) return FALSE;
+    if (!perm_is_root() && has_path_separator(name) && deny_if_forbidden(name, TRUE)) return TRUE;
+    if (!perm_check(name, PERM_OP_READ | PERM_OP_EXEC)) {
+        print_simple("Permission denied.");
+        return TRUE;
+    }
     if (!load_program_with_path(name)) {
         print_simple("Unable to load program.");
         return TRUE;
@@ -702,6 +986,117 @@ static BOOL run_sync(void) {
     return TRUE;
 }
 
+static BOOL run_whoami(void) {
+    const SIMA_USER *u = user_current();
+    if (!u) {
+        print_simple("ROOT");
+        return TRUE;
+    }
+    print_message(u->name);
+    return TRUE;
+}
+
+static BOOL run_users(void) {
+    UINT16 i;
+    const SIMA_USER *u;
+    char uid_s[8];
+    char line[128];
+
+    print_message("Users:");
+    for (i = 0; ; ++i) {
+        u = user_at(i);
+        if (!u) break;
+        sima_memclr(uid_s, (UINT16)sizeof(uid_s));
+        sima_utoa(u->uid, uid_s, (UINT16)sizeof(uid_s), 10);
+        sima_memclr(line, (UINT16)sizeof(line));
+        sima_strcpy(line, (UINT16)sizeof(line), "  ");
+        sima_strcat(line, (UINT16)sizeof(line), u->name);
+        sima_strcat(line, (UINT16)sizeof(line), " uid=");
+        sima_strcat(line, (UINT16)sizeof(line), uid_s);
+        sima_strcat(line, (UINT16)sizeof(line), " home=");
+        sima_strcat(line, (UINT16)sizeof(line), u->home);
+        print_message(line);
+    }
+    return TRUE;
+}
+
+static BOOL run_useradd(const char *name, const char *password) {
+    if (!name || name[0] == '\0') return FALSE;
+    if (!perm_is_root()) {
+        print_simple("Permission denied. Only root can add users.");
+        return TRUE;
+    }
+    if (!user_add(name, password)) {
+        print_simple("Unable to add user.");
+        return TRUE;
+    }
+    print_simple("User added.");
+    return TRUE;
+}
+
+static BOOL run_login(const char *name, const char *password) {
+    char pass_buf[USER_PASS_MAX];
+    const char *pass = password;
+    if (!name || name[0] == '\0') return FALSE;
+    sima_memclr(pass_buf, (UINT16)sizeof(pass_buf));
+    if (!pass || pass[0] == '\0') {
+        wait_prompt("password: ", pass_buf);
+        pass = pass_buf;
+    }
+    if (!user_login(name, pass)) {
+        print_simple("Unable to switch user.");
+        return TRUE;
+    }
+    sima_memclr(pass_buf, (UINT16)sizeof(pass_buf));
+    print_simple("User switched.");
+    return TRUE;
+}
+
+static BOOL run_passwd(void) {
+    char old_buf[USER_PASS_MAX];
+    char new_buf[USER_PASS_MAX];
+
+    sima_memclr(old_buf, (UINT16)sizeof(old_buf));
+    sima_memclr(new_buf, (UINT16)sizeof(new_buf));
+
+    wait_prompt("current password: ", old_buf);
+    wait_prompt("new password: ", new_buf);
+
+    if (new_buf[0] == '\0') {
+        print_simple("New password cannot be empty.");
+        sima_memclr(old_buf, (UINT16)sizeof(old_buf));
+        sima_memclr(new_buf, (UINT16)sizeof(new_buf));
+        return TRUE;
+    }
+
+    if (!user_change_password(old_buf, new_buf)) {
+        print_simple("Unable to update password.");
+        sima_memclr(old_buf, (UINT16)sizeof(old_buf));
+        sima_memclr(new_buf, (UINT16)sizeof(new_buf));
+        return TRUE;
+    }
+
+    sima_memclr(old_buf, (UINT16)sizeof(old_buf));
+    sima_memclr(new_buf, (UINT16)sizeof(new_buf));
+    print_simple("Password updated.");
+    return TRUE;
+}
+
+static BOOL run_id(void) {
+    const SIMA_USER *u = user_current();
+    char uid_s[8];
+    char line[64];
+    UINT16 uid = u ? u->uid : 0;
+
+    sima_memclr(uid_s, (UINT16)sizeof(uid_s));
+    sima_utoa(uid, uid_s, (UINT16)sizeof(uid_s), 10);
+    sima_memclr(line, (UINT16)sizeof(line));
+    sima_strcpy(line, (UINT16)sizeof(line), "uid=");
+    sima_strcat(line, (UINT16)sizeof(line), uid_s);
+    print_message(line);
+    return TRUE;
+}
+
 BOOL run_buffer(char *buffer)
 {
     UINT16 argc;
@@ -710,7 +1105,7 @@ BOOL run_buffer(char *buffer)
     if (!buffer || buffer[0] == '\0') return FALSE;
 
 	sima_strcpy(temp,sizeof(temp),buffer);
-    argc = sima_strcspl(temp, ' ', argv, (UINT16)16); /* ← 반드시 argv, &argv 아님 */
+    argc = parse_argv(temp, argv, (UINT16)16);
     if (argc == 0 || !argv[0] || argv[0][0] == '\0') return FALSE;
 	
     /* argv[0] 가 명령어 */
@@ -721,9 +1116,20 @@ BOOL run_buffer(char *buffer)
 	else if(sima_strcmp(argv[0], "ver") == STRC_SAME) {
 		return wrong_command_usage(buffer);
 	}
-    if (sima_strcmp(argv[0], "help") == STRC_SAME && argc == 1) {
-        run_help();
-        return TRUE;
+    if (sima_strcmp(argv[0], "help") == STRC_SAME) {
+        if (argc == 1) {
+            run_help();
+            return TRUE;
+        }
+        if (argc == 2) {
+            return run_man(argv[1]);
+        }
+        return wrong_command_usage(buffer);
+    }
+    if (sima_strcmp(argv[0], "man") == STRC_SAME) {
+        if (argc == 1) return run_man((const char*)0);
+        if (argc == 2) return run_man(argv[1]);
+        return wrong_command_usage(buffer);
     }
     if (sima_strcmp(argv[0], "cls") == STRC_SAME && argc == 1) {
         return run_cls();
@@ -745,8 +1151,16 @@ BOOL run_buffer(char *buffer)
         return run_cat(argv[1]);
     }
     if (sima_strcmp(argv[0], "write") == STRC_SAME && argc >= 3) {
-        const char *data = skip_tokens(buffer, 2);
-        return run_write(argv[1], data);
+        char data_buf[256];
+        UINT16 i;
+        sima_memclr(data_buf, (UINT16)sizeof(data_buf));
+        for (i = 2; i < argc; ++i) {
+            if (i != 2) {
+                sima_strcat(data_buf, (UINT16)sizeof(data_buf), " ");
+            }
+            sima_strcat(data_buf, (UINT16)sizeof(data_buf), argv[i]);
+        }
+        return run_write(argv[1], data_buf);
     }
     if (sima_strcmp(argv[0], "edit") == STRC_SAME && argc == 2) {
         return run_edit(argv[1]);
@@ -775,7 +1189,31 @@ BOOL run_buffer(char *buffer)
     if (sima_strcmp(argv[0], "diskinfo") == STRC_SAME && argc == 1) {
         return run_diskinfo();
     }
+    if (sima_strcmp(argv[0], "whoami") == STRC_SAME && argc == 1) {
+        return run_whoami();
+    }
+    if (sima_strcmp(argv[0], "users") == STRC_SAME && argc == 1) {
+        return run_users();
+    }
+    if (sima_strcmp(argv[0], "useradd") == STRC_SAME) {
+        if (argc == 2) return run_useradd(argv[1], argv[1]);
+        if (argc == 3) return run_useradd(argv[1], argv[2]);
+        return wrong_command_usage(buffer);
+    }
+    if ((sima_strcmp(argv[0], "login") == STRC_SAME ||
+         sima_strcmp(argv[0], "su") == STRC_SAME)) {
+        if (argc == 2) return run_login(argv[1], NULL);
+        if (argc == 3) return run_login(argv[1], argv[2]);
+        return wrong_command_usage(buffer);
+    }
+    if (sima_strcmp(argv[0], "id") == STRC_SAME && argc == 1) {
+        return run_id();
+    }
+    if (sima_strcmp(argv[0], "passwd") == STRC_SAME && argc == 1) {
+        return run_passwd();
+    }
     if (sima_strcmp(argv[0], "help") == STRC_SAME ||
+        sima_strcmp(argv[0], "man") == STRC_SAME ||
         sima_strcmp(argv[0], "cls") == STRC_SAME ||
         sima_strcmp(argv[0], "ls") == STRC_SAME ||
         sima_strcmp(argv[0], "cd") == STRC_SAME ||
@@ -790,7 +1228,14 @@ BOOL run_buffer(char *buffer)
         sima_strcmp(argv[0], "run") == STRC_SAME ||
         sima_strcmp(argv[0], "exec") == STRC_SAME ||
         sima_strcmp(argv[0], "sync") == STRC_SAME ||
-        sima_strcmp(argv[0], "diskinfo") == STRC_SAME) {
+        sima_strcmp(argv[0], "diskinfo") == STRC_SAME ||
+        sima_strcmp(argv[0], "whoami") == STRC_SAME ||
+        sima_strcmp(argv[0], "users") == STRC_SAME ||
+        sima_strcmp(argv[0], "useradd") == STRC_SAME ||
+        sima_strcmp(argv[0], "login") == STRC_SAME ||
+        sima_strcmp(argv[0], "su") == STRC_SAME ||
+        sima_strcmp(argv[0], "id") == STRC_SAME ||
+        sima_strcmp(argv[0], "passwd") == STRC_SAME) {
         return wrong_command_usage(buffer);
     }
     return FALSE;

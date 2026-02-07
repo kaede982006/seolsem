@@ -33,8 +33,13 @@ section .text
 %define FAT32_EOC       0x0FFFFFF8
 %define FAT32_EOC_VALUE 0x0FFFFFFF
 %define ROOT_CLUSTER    2
+%define SRC_BOOT_MAGIC_OFS 0x01F0
+%define SRC_BOOT_MAGIC_LEN 8
 
 jmp STAGE2_SEG:start
+
+; UI/TUI helpers (VGA text mode)
+%include "bootloader/ui.inc"
 
 ; --------------------------
 ; Entry
@@ -52,10 +57,34 @@ start:
 
     call init_serial
 
-    mov si, msg_banner
-    call print_string
+    call ui_init
+
+    ; ---- Confirmation UI (TUI) ----
+    call ui_confirm_install
+    jc .cancel
+
+    ; Optional: collect user list to pre-create /ETC/PASSWD and /HOME entries.
+    call prompt_users
+
+    ; ---- Progress UI ----
+    call ui_draw_base
+    xor ax, ax
+    mov [ui_done_mask], ax
+    mov byte [ui_cur_step], 0
+    mov bx, [ui_done_mask]
+    mov al, 0
+    call ui_steps_render
+    mov si, ui_status_detect
+    call ui_status
+    xor al, al
+    call ui_progress
+
+    mov si, ui_log_start
+    call ui_log_push
 
     ; ---- Get HDD geometry ----
+    mov si, ui_log_hdd_geom
+    call ui_log_push
     mov dl, DST_DRIVE
     call get_geometry
     jc fatal_disk
@@ -64,6 +93,8 @@ start:
     mov [dst_cyls], cx
 
     ; ---- Detect HDD total sectors (EDD preferred) ----
+    mov si, ui_log_hdd_size
+    call ui_log_push
     mov dl, DST_DRIVE
     call get_total_sectors_32
     jc  .no_edd
@@ -73,63 +104,26 @@ start:
     mov byte [dst_has_edd], 0
     call calc_total_sectors_chs_32
 .got_sectors:
-    mov si, msg_hdd_sectors
-    call print_string
-    ; BIOS interrupts may clobber DS; we keep DS=CS for our data.
-    push cs
-    pop ds
-    mov ax, [dst_secs_hi]
-    mov bx, [dst_secs_lo]
-    call print_hex32_hilo
-    call print_crlf
 
-    ; ---- Confirmation UI ----
-    mov si, msg_confirm1
-    call print_string
-    call read_key
-    call print_crlf
-
-    cmp al, 'Y'
-    je  .confirm2
-    cmp al, 'y'
-    je  .confirm2
-    mov si, msg_cancel
-    call print_string
-    jmp halt_forever
-
-.confirm2:
-    mov si, msg_confirm2
-    call print_string
-    call read_line_upper
-    call print_crlf
-
-    ; Accept only "YES"
-    mov si, line_buf
-    cmp byte [si+0], 'Y'
-    jne .bad_yes
-    cmp byte [si+1], 'E'
-    jne .bad_yes
-    cmp byte [si+2], 'S'
-    jne .bad_yes
-    cmp byte [si+3], 0
-    jne .bad_yes
+    ; ---- Source disk detection ----
+    mov si, ui_log_src_try_b
+    call ui_log_push
     ; Two-floppy setup: if B: already has the Seolsem system disk, skip swap prompt.
     mov byte [src_drive], SRC_DRIVE_B
-    call read_src_boot_sector
+    call try_prepare_source_disk
     jnc .src_ready
-    jmp .swap_prompt
-.bad_yes:
-    mov si, msg_cancel
-    call print_string
-    jmp halt_forever
 
-.swap_prompt:
-    mov si, msg_swap
-    call print_string
-    call read_key
-    call print_crlf
+    ; One-floppy setup: try up to 4 additional attempts on A: (total tries = 5).
+    mov byte [src_retry_left], 4
+.retry_src:
+    ; Only show retry message if this is not the first attempt
+    cmp byte [src_retry_left], 4
+    je  .skip_retry_msg
+    mov si, ui_log_src_retry
+    call ui_log_push
+.skip_retry_msg:
+    call ui_swap_prompt
 
-    ; One-floppy setup: assume the user swapped the system disk into A:.
     mov byte [src_drive], INSTALL_DRIVE
     ; Reset A: after swap
     push ds
@@ -138,8 +132,12 @@ start:
     int 0x13
     pop ds
 
-    call read_src_boot_sector
-    jc fatal_disk
+    call try_prepare_source_disk
+    jnc .src_ready
+
+    dec byte [src_retry_left]
+    jnz .retry_src
+    jmp fatal_source
 .src_ready:
 
     ; Detect whether the swapped source drive supports INT 13h extensions.
@@ -154,6 +152,8 @@ start:
 .src_edd_done:
 
     ; ---- Get floppy geometry ----
+    mov si, ui_log_src_geom
+    call ui_log_push
     mov dl, [src_drive]
     call get_geometry
     jc fatal_disk
@@ -165,24 +165,70 @@ start:
     mov ax, BUF_SEG
     mov es, ax
 
+    mov si, ui_log_parse_bpb
+    call ui_log_push
     call parse_src_bpb
     jc fatal_bpb
+
+    ; Safety guard: HDD VBR (boot32.bin) loads stage2 in a fixed 4-sector window.
+    ; Source FAT12 image encodes stage2 size as (ReservedSectors - 1).
+    ; If stage2 exceeds 4 sectors, installation would appear to succeed but HDD boot will hang.
+    mov ax, [src_reserved]
+    cmp ax, (1 + 4)
+    jbe .stage2_ok
+    jmp fatal_stage2
+.stage2_ok:
+    mov si, ui_log_calc_src
+    call ui_log_push
     call calc_src_layout
     jc fatal_bpb
 
+    ; Validate source media before any destructive write to HDD.
+    mov si, ui_log_validate_src
+    call ui_log_push
+    call verify_source_seolsem_image
+    jc fatal_source
+
     ; ---- Compute destination (partition) layout (FAT32) ----
+    mov si, ui_log_calc_dst
+    call ui_log_push
     call calc_dst_layout_fat32
     jc fatal_layout
+    or word [ui_done_mask], (1 << 0)
 
     ; ---- Write MBR (LBA0) ----
+    mov byte [ui_cur_step], 1
+    mov bx, [ui_done_mask]
+    mov al, [ui_cur_step]
+    call ui_steps_render
+    mov si, ui_status_partition
+    call ui_status
+    mov al, 20
+    call ui_progress
+    mov si, ui_log_write_mbr
+    call ui_log_push
     call write_mbr_fat32
     jc fatal_disk
+    or word [ui_done_mask], (1 << 1)
 
     ; ---- Create FAT32 VBR ----
     ; We construct a new FAT32 BPB in memory
+    mov byte [ui_cur_step], 2
+    mov bx, [ui_done_mask]
+    mov al, [ui_cur_step]
+    call ui_steps_render
+    mov si, ui_status_format
+    call ui_status
+    mov al, 35
+    call ui_progress
+    mov si, ui_log_write_vbr
+    call ui_log_push
     call create_fat32_vbr
     
     ; Write VBR to partition start
+    mov ax, BUF_SEG
+    mov es, ax
+    xor bx, bx
     mov dx, word (PART_START_LBA >> 16)
     mov ax, word (PART_START_LBA & 0xFFFF)
     mov si, DST_DRIVE
@@ -190,7 +236,12 @@ start:
     jc fatal_disk
 
     ; Write FS Info Sector (Sector 1 relative to part start)
+    mov si, ui_log_write_fsinfo
+    call ui_log_push
     call create_fs_info
+    mov ax, BUF_SEG
+    mov es, ax
+    xor bx, bx
     mov dx, word (PART_START_LBA >> 16)
     mov ax, word (PART_START_LBA & 0xFFFF)
     add ax, 1
@@ -199,21 +250,45 @@ start:
     call write_sector_lba32
     jc fatal_disk
 
-    ; ---- Copy reserved sectors (stage2) ----
-    mov si, msg_copy_reserved
-    call print_string
-    call copy_stage2_to_hdd
-    jc fatal_disk
-    
     ; ---- Clear FAT tables ----
+    mov si, ui_log_clear_fat
+    call ui_log_push
     call clear_fat32_tables
     jc fatal_disk
 
     ; ---- Initialize Root Directory Cluster (Cluster 2) ----
+    mov si, ui_log_init_root
+    call ui_log_push
     call init_root_cluster
     jc fatal_disk
+    or word [ui_done_mask], (1 << 2)
+
+    ; ---- Copy reserved sectors (stage2) ----
+    mov byte [ui_cur_step], 3
+    mov bx, [ui_done_mask]
+    mov al, [ui_cur_step]
+    call ui_steps_render
+    mov si, ui_status_copy_boot
+    call ui_status
+    mov al, 45
+    call ui_progress
+    mov si, ui_log_copy_boot
+    call ui_log_push
+    call copy_stage2_to_hdd
+    jc fatal_disk
+    or word [ui_done_mask], (1 << 3)
 
     ; ---- Load source FAT and root directory (for file copying) ----
+    mov byte [ui_cur_step], 4
+    mov bx, [ui_done_mask]
+    mov al, [ui_cur_step]
+    call ui_steps_render
+    mov si, ui_status_copy_files
+    call ui_status
+    mov al, 55
+    call ui_progress
+    mov si, ui_log_load_src
+    call ui_log_push
     mov ax, SRC_FAT_SEG
     mov es, ax
     xor bx, bx
@@ -239,49 +314,110 @@ start:
     jc fatal_disk
 
     ; ---- Install filesystem (Copy files) ----
-    mov si, msg_install_fs
-    call print_string
+    mov si, ui_log_install
+    call ui_log_push
     call install_fs_fat32
     jc fatal_install
-    call print_crlf
 
-    mov si, msg_done
-    call print_string
+    mov si, ui_log_done
+    call ui_log_push
+    jmp halt_forever
+
+.cancel:
+    push cs
+    pop ds
+    call ui_draw_base
+    xor bx, bx
+    mov al, 0
+    call ui_steps_render
+    mov si, ui_status_cancel
+    call ui_status
+    xor al, al
+    call ui_progress
+    mov si, ui_log_cancel
+    call ui_log_push
     jmp halt_forever
 
 ; --------------------------
 ; Fatal handlers
 ; --------------------------
 fatal_disk:
-    mov si, msg_disk_error
-    call print_string
-    call print_disk_error_detail
+    push cs
+    pop ds
+    mov si, ui_err_disk
+    call ui_status
+    mov al, 0
+    call ui_progress
+    mov si, ui_err_disk
+    call ui_log_push
     jmp halt_forever
 
 fatal_bpb:
-    mov si, msg_bad_bpb
-    call print_string
+    push cs
+    pop ds
+    mov si, ui_err_bpb
+    call ui_status
+    mov al, 0
+    call ui_progress
+    mov si, ui_err_bpb
+    call ui_log_push
+    jmp halt_forever
+
+fatal_source:
+    push cs
+    pop ds
+    mov si, ui_err_source
+    call ui_status
+    mov al, 0
+    call ui_progress
+    mov si, ui_err_source
+    call ui_log_push
+    jmp halt_forever
+
+fatal_stage2:
+    push cs
+    pop ds
+    mov si, ui_err_stage2
+    call ui_status
+    mov al, 0
+    call ui_progress
+    mov si, ui_err_stage2
+    call ui_log_push
     jmp halt_forever
 
 fatal_layout:
-    mov si, msg_layout_fail
-    call print_string
+    push cs
+    pop ds
+    mov si, ui_err_layout
+    call ui_status
+    mov al, 0
+    call ui_progress
+    mov si, ui_err_layout
+    call ui_log_push
     jmp halt_forever
 
 fatal_install:
-    mov si, msg_install_fail
-    call print_string
+    push cs
+    pop ds
+    mov si, ui_err_install
+    call ui_status
+    mov al, 0
+    call ui_progress
+    mov si, ui_err_install
+    call ui_log_push
     jmp halt_forever
 
 halt_forever:
-    mov si, msg_reboot
-    call print_string
+    push cs
+    pop ds
+    mov si, ui_status_reboot
+    call ui_status
+    mov al, 100
+    call ui_progress
     xor ax, ax
     int 0x16        ; Wait for key
     int 0x19        ; Warm boot (DL should be drive? 19h usually reloads form boot drive)
     jmp $
-
-msg_reboot db 13, 10, 'Press any key to reboot...', 13, 10, 0
 
 
 ; --------------------------
@@ -362,15 +498,253 @@ read_key:
     int 0x16
     ret
 
-; Read a short line, uppercase A-Z. Ends on Enter. Backspace supported.
+; --------------------------
+; TUI: dialogs/helpers
+; --------------------------
+
+; CF=0 confirmed, CF=1 cancelled/failed.
+ui_confirm_install:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push ds
+
+    push cs
+    pop ds
+
+    call ui_draw_base
+    xor bx, bx
+    mov al, 0
+    call ui_steps_render
+    mov si, ui_status_confirm
+    call ui_status
+    xor al, al
+    call ui_progress
+
+    mov si, ui_log_confirm
+    call ui_log_push
+
+    ; Dialog box
+    mov dh, 6
+    mov dl, 18
+    mov ch, 17
+    mov cl, 61
+    mov bh, UI_ATTR_BORDER
+    mov bl, UI_ATTR_BG
+    call ui_draw_box
+
+    mov dh, 7
+    mov dl, 26
+    mov bl, UI_ATTR_BORDER
+    mov si, ui_confirm_title
+    call ui_puts
+
+    mov dh, 9
+    mov dl, 20
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_confirm_line1
+    call ui_puts
+    mov dh, 10
+    mov dl, 20
+    mov si, ui_confirm_line2
+    call ui_puts
+
+    mov dh, 13
+    mov dl, 20
+    mov si, ui_confirm_q
+    call ui_puts
+
+.wait_yn:
+    call read_key
+    cmp al, 27          ; ESC
+    je  .cancel
+    cmp al, 'N'
+    je  .cancel
+    cmp al, 'n'
+    je  .cancel
+    cmp al, 'Y'
+    je  .type_yes
+    cmp al, 'y'
+    je  .type_yes
+    jmp .wait_yn
+
+.type_yes:
+    mov si, ui_status_type_yes
+    call ui_status
+    xor al, al
+    call ui_progress
+
+    mov dh, 15
+    mov dl, 20
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_confirm_type
+    call ui_puts
+
+    ; Clear input field
+    mov dh, 16
+    mov dl, 30
+    mov cl, 10
+    mov bl, UI_ATTR_BG
+    call ui_fill_row
+
+    ; Read YES into line_buf at (16,30)
+    mov dh, 16
+    mov dl, 30
+    mov bl, UI_ATTR_TEXT
+    call read_line_upper
+
+    ; Accept "YES" (case-insensitive)
+    mov si, line_buf
+    mov al, [si+0]
+    cmp al, 'Y'
+    je  .y_ok
+    cmp al, 'y'
+    jne .bad_yes
+.y_ok:
+    mov al, [si+1]
+    cmp al, 'E'
+    je  .e_ok
+    cmp al, 'e'
+    jne .bad_yes
+.e_ok:
+    mov al, [si+2]
+    cmp al, 'S'
+    je  .s_ok
+    cmp al, 's'
+    jne .bad_yes
+.s_ok:
+    cmp byte [si+3], 0
+    jne .bad_yes
+
+    clc
+    jmp .ret
+
+.bad_yes:
+    mov si, ui_status_bad_yes
+    call ui_status
+    xor al, al
+    call ui_progress
+    stc
+    jmp .ret
+
+.cancel:
+    stc
+.ret:
+    pop ds
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Wait for swap confirmation (one-floppy).
+ui_swap_prompt:
+    push ax
+    push si
+    push ds
+    push cs
+    pop ds
+    mov si, ui_log_swap
+    call ui_log_push
+    mov si, ui_status_swap
+    call ui_status
+    xor al, al
+    call ui_progress
+    call read_key
+    pop ds
+    pop si
+    pop ax
+    ret
+
+; Render list of currently added users (inside the user dialog).
+ui_render_user_list:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push ds
+
+    push cs
+    pop ds
+
+    ; Clear list area (rows 11..14)
+    mov dh, 11
+.clr:
+    mov dl, 18
+    mov cl, 44
+    mov bl, UI_ATTR_BG
+    call ui_fill_row
+    inc dh
+    cmp dh, 14
+    jbe .clr
+
+    mov dh, 11
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_users_list
+    call ui_puts
+
+    xor di, di
+.ul_loop:
+    mov al, [inst_user_count]
+    xor ah, ah
+    cmp di, ax
+    jae .done
+
+    mov ax, di
+    mov dl, LINE_BUF_MAX
+    mul dl                      ; AX = index * LINE_BUF_MAX
+    mov si, inst_user_names
+    add si, ax
+
+    mov dh, 12
+    mov ax, di
+    add dh, al
+    mov dl, 20
+    mov bl, UI_ATTR_TEXT
+    call ui_puts
+
+    inc di
+    jmp .ul_loop
+
+.done:
+    pop ds
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Read a short line. Ends on Enter. Backspace supported.
 ; Result stored to line_buf and NUL-terminated.
+; IN:  DH=row, DL=col, BL=attr (UI)
 read_line_upper:
     push ax
     push bx
     push cx
+    push dx
     push di
     mov di, line_buf
     mov cx, 0
+    mov [ui_in_row], dh
+    mov [ui_in_col], dl
+    mov [ui_in_col0], dl
+    mov [ui_in_attr], bl
+
+    ; Cursor set
+    mov dh, [ui_in_row]
+    mov dl, [ui_in_col]
+    call ui_set_cursor
+
 .rl_loop:
     xor ah, ah
     int 0x16
@@ -385,34 +759,546 @@ read_line_upper:
     je  .rl_loop
     dec cx
     dec di
-    ; erase one char on screen: BS, space, BS
-    mov al, 8
-    call print_char
+    ; erase one char in UI
+    mov dl, [ui_in_col]
+    cmp dl, [ui_in_col0]
+    jbe .rl_loop
+    dec dl
+    mov [ui_in_col], dl
+    mov dh, [ui_in_row]
+    mov bl, [ui_in_attr]
     mov al, ' '
-    call print_char
-    mov al, 8
-    call print_char
+    call ui_putc
+    
+    ; Cursor update
+    mov dh, [ui_in_row]
+    mov dl, [ui_in_col]
+    call ui_set_cursor
+
     jmp .rl_loop
 .rl_char:
     cmp cx, (LINE_BUF_MAX-1)
     jae .rl_loop
-    ; uppercase
-    cmp al, 'a'
-    jb  .store
-    cmp al, 'z'
-    ja  .store
-    sub al, 32
 .store:
     mov [di], al
     inc di
     inc cx
-    call print_char
+    mov dh, [ui_in_row]
+    mov dl, [ui_in_col]
+    mov bl, [ui_in_attr]
+    call ui_putc
+    inc byte [ui_in_col]
+    
+    ; Cursor update
+    mov dh, [ui_in_row]
+    mov dl, [ui_in_col]
+    call ui_set_cursor
+
     jmp .rl_loop
 .rl_done:
     mov byte [di], 0
     pop di
+    pop dx
     pop cx
     pop bx
+    pop ax
+    ret
+
+; Read a short line but mask characters on screen (for passwords).
+; Stores the real input into line_buf, but renders '*' for each character.
+; IN:  DH=row, DL=col, BL=attr (UI)
+read_line_masked:
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+    mov di, line_buf
+    mov cx, 0
+    mov [ui_in_row], dh
+    mov [ui_in_col], dl
+    mov [ui_in_col0], dl
+    mov [ui_in_attr], bl
+
+    ; Cursor set
+    mov dh, [ui_in_row]
+    mov dl, [ui_in_col]
+    call ui_set_cursor
+
+.rl_loop:
+    xor ah, ah
+    int 0x16
+    ; Ignore extended keys (AL=0, scan code in AH)
+    test al, al
+    jz  .rl_loop
+    cmp al, 13
+    je  .rl_done
+    cmp al, 8
+    jne .rl_char
+    cmp cx, 0
+    je  .rl_loop
+    dec cx
+    dec di
+    ; erase one char in UI
+    mov dl, [ui_in_col]
+    cmp dl, [ui_in_col0]
+    jbe .rl_loop
+    dec dl
+    mov [ui_in_col], dl
+    mov dh, [ui_in_row]
+    mov bl, [ui_in_attr]
+    mov al, ' '
+    call ui_putc
+
+    ; Cursor update
+    mov dh, [ui_in_row]
+    mov dl, [ui_in_col]
+    call ui_set_cursor
+
+    jmp .rl_loop
+.rl_char:
+    cmp cx, (LINE_BUF_MAX-1)
+    jae .rl_loop
+.store:
+    mov [di], al
+    inc di
+    inc cx
+    mov dh, [ui_in_row]
+    mov dl, [ui_in_col]
+    mov bl, [ui_in_attr]
+    mov al, '*'
+    call ui_putc
+    inc byte [ui_in_col]
+
+    ; Cursor update
+    mov dh, [ui_in_row]
+    mov dl, [ui_in_col]
+    call ui_set_cursor
+
+    jmp .rl_loop
+.rl_done:
+    mov byte [di], 0
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Prompt for user list (optional). Stores additional users to inst_user_*.
+; - Usernames/Passwords: 1..8 chars, A-Z a-z 0-9 '_'
+; - Blank line ends input.
+prompt_users:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push ds
+
+    push cs
+    pop ds
+
+    mov byte [inst_user_count], 0
+    mov byte [inst_root_pass], 0
+
+    ; Draw user setup dialog
+    call ui_draw_base
+    xor bx, bx
+    mov al, 0
+    call ui_steps_render
+    mov si, ui_status_users
+    call ui_status
+    xor al, al
+    call ui_progress
+
+    ; Dialog box
+    mov dh, 4
+    mov dl, 14
+    mov ch, 20
+    mov cl, 65
+    mov bh, UI_ATTR_BORDER
+    mov bl, UI_ATTR_BG
+    call ui_draw_box
+
+    mov dh, 5
+    mov dl, 24
+    mov bl, UI_ATTR_BORDER
+    mov si, ui_users_title
+    call ui_puts
+
+    mov dh, 7
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_users_q
+    call ui_puts
+
+    mov dh, 9
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_users_opt
+    call ui_puts
+
+    mov dh, 11
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_users_root_pw
+    call ui_puts
+    ; Clear input field
+    mov dh, 11
+    mov dl, 44
+    mov cl, 12
+    mov bl, UI_ATTR_BG
+    call ui_fill_row
+    ; Read root password into line_buf at (11,44) (blank allowed)
+    mov dh, 11
+    mov dl, 44
+    mov bl, UI_ATTR_TEXT
+    call read_line_masked
+    call store_root_password
+    ; Clear password field so the entered secret is not left visible on screen.
+    mov dh, 11
+    mov dl, 44
+    mov cl, 12
+    mov bl, UI_ATTR_BG
+    call ui_fill_row
+
+.choose:
+    call read_key
+    cmp al, 27          ; ESC
+    je  .done
+    cmp al, 13          ; ENTER (default No)
+    je  .done
+    cmp al, 'N'
+    je  .done
+    cmp al, 'n'
+    je  .done
+    cmp al, 'Y'
+    je  .input_loop
+    cmp al, 'y'
+    je  .input_loop
+    jmp .choose
+
+.input_loop:
+    ; Render user list
+    call ui_render_user_list
+
+    mov al, [inst_user_count]
+    cmp al, MAX_INSTALL_USERS
+    jae .limit
+
+    ; Prompt
+    mov dh, 16
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_users_name
+    call ui_puts
+    ; Clear input field
+    mov dh, 16
+    mov dl, 44
+    mov cl, 12
+    mov bl, UI_ATTR_BG
+    call ui_fill_row
+    ; Read username into line_buf at (16,44)
+    mov dh, 16
+    mov dl, 44
+    mov bl, UI_ATTR_TEXT
+    call read_line_upper
+
+    mov si, line_buf
+    cmp byte [si], 0
+    je  .done
+
+    call validate_username
+    jc  .invalid
+
+    call is_duplicate_username
+    jc  .dup
+
+    mov al, [inst_user_count]
+    call store_username_slot
+    
+.password_loop:
+    ; Prompt password for this user
+    mov dh, 17
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_users_pass
+    call ui_puts
+    ; Clear password field
+    mov dh, 17
+    mov dl, 44
+    mov cl, 12
+    mov bl, UI_ATTR_BG
+    call ui_fill_row
+    ; Read password into line_buf at (17,44)
+    mov dh, 17
+    mov dl, 44
+    mov bl, UI_ATTR_TEXT
+    call read_line_masked
+
+    mov si, line_buf
+    cmp byte [si], 0
+    je  .invalid_pw
+    call validate_username
+    jc  .invalid_pw
+
+    mov al, [inst_user_count]
+    call store_password_slot
+    ; Clear password field so the entered secret is not left visible on screen.
+    mov dh, 17
+    mov dl, 44
+    mov cl, 12
+    mov bl, UI_ATTR_BG
+    call ui_fill_row
+    inc byte [inst_user_count]
+    jmp .input_loop
+
+.invalid:
+    mov si, ui_users_invalid
+    call ui_status
+    xor al, al
+    call ui_progress
+    jmp .input_loop
+
+.invalid_pw:
+    mov si, ui_users_invalid_pw
+    call ui_status
+    xor al, al
+    call ui_progress
+    jmp .password_loop
+
+.dup:
+    mov si, ui_users_dup
+    call ui_status
+    xor al, al
+    call ui_progress
+    jmp .input_loop
+
+.limit:
+    mov si, ui_users_limit
+    call ui_status
+    xor al, al
+    call ui_progress
+
+.done:
+    pop ds
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; CF=1 if invalid
+validate_username:
+    push ax
+    push cx
+    push si
+    mov si, line_buf
+    xor cx, cx
+.vloop:
+    mov al, [si]
+    cmp al, 0
+    je  .vend
+    inc cx
+    cmp cx, 8
+    ja  .bad
+    cmp al, 'A'
+    jb  .check_lower
+    cmp al, 'Z'
+    jbe .vnext
+.check_lower:
+    cmp al, 'a'
+    jb  .check_digit
+    cmp al, 'z'
+    jbe .vnext
+.check_digit:
+    cmp al, '0'
+    jb  .check_us
+    cmp al, '9'
+    jbe .vnext
+.check_us:
+    cmp al, '_'
+    je  .vnext
+    jmp .bad
+.vnext:
+    inc si
+    jmp .vloop
+.vend:
+    cmp cx, 0
+    je  .bad
+    clc
+    jmp .vret
+.bad:
+    stc
+.vret:
+    pop si
+    pop cx
+    pop ax
+    ret
+
+; CF=1 if duplicate exists
+is_duplicate_username:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    mov cl, [inst_user_count]
+    xor ch, ch
+    xor bx, bx
+.dloop:
+    cmp bx, cx
+    jae .no
+    mov al, bl
+    mov dl, LINE_BUF_MAX
+    mul dl                      ; AX = index * LINE_BUF_MAX
+    mov si, inst_user_names
+    add si, ax
+    mov di, line_buf
+    call strcmp_z
+    jc  .yes
+    inc bx
+    jmp .dloop
+.no:
+    clc
+    jmp .dret
+.yes:
+    stc
+.dret:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; CF=1 if equal
+strcmp_z:
+    push ax
+.sloop:
+    mov al, [si]
+    cmp al, [di]
+    jne .neq
+    cmp al, 0
+    je  .eq
+    inc si
+    inc di
+    jmp .sloop
+.eq:
+    stc
+    pop ax
+    ret
+.neq:
+    clc
+    pop ax
+    ret
+
+; Store line_buf into inst_user_names[AL]
+store_username_slot:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    mov dl, LINE_BUF_MAX
+    mul dl                      ; AX = index * LINE_BUF_MAX
+    mov di, inst_user_names
+    add di, ax
+    mov si, line_buf
+    mov cx, LINE_BUF_MAX
+.copy:
+    mov al, [si]
+    mov [di], al
+    inc si
+    inc di
+    dec cx
+    jz  .done
+    test al, al
+    jnz .copy
+.zero:
+    mov byte [di], 0
+    inc di
+    dec cx
+    jnz .zero
+.done:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Store line_buf into inst_user_passes[AL]
+store_password_slot:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    mov dl, LINE_BUF_MAX
+    mul dl                      ; AX = index * LINE_BUF_MAX
+    mov di, inst_user_passes
+    add di, ax
+    mov si, line_buf
+    mov cx, LINE_BUF_MAX
+.copy:
+    mov al, [si]
+    mov [di], al
+    inc si
+    inc di
+    dec cx
+    jz  .done
+    test al, al
+    jnz .copy
+.zero:
+    mov byte [di], 0
+    inc di
+    dec cx
+    jnz .zero
+.done:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Store line_buf into inst_root_pass
+store_root_password:
+    push ax
+    push cx
+    push si
+    push di
+    push ds
+
+    push cs
+    pop ds
+
+    mov si, line_buf
+    mov di, inst_root_pass
+    mov cx, (LINE_BUF_MAX-1)
+.rloop:
+    lodsb
+    stosb
+    test al, al
+    je  .done
+    loop .rloop
+    mov byte [di-1], 0
+.done:
+    pop ds
+    pop di
+    pop si
+    pop cx
     pop ax
     ret
 
@@ -670,6 +1556,8 @@ read_sector_lba32:
     push ds
     push es
 
+    call ui_status_tick
+
     push cs
     pop ds
     ; Save drive to a temp byte (don't use DL because DX holds LBA high word).
@@ -788,6 +1676,8 @@ write_sector_lba32:
     push ds
     push es
 
+    call ui_status_tick
+
     push cs
     pop ds
     ; Save drive to a temp byte (don't use DL because DX holds LBA high word).
@@ -905,6 +1795,8 @@ read_sectors_lba32:
     cmp cx, 0
     je .done
 
+    call ui_status_tick
+
     call read_sector_lba32
     jc .fail
 
@@ -935,6 +1827,117 @@ read_sectors_lba32:
 
 ; Read source boot sector (LBA 0) from [src_drive] into BUF_SEG.
 ; CF=1 on error.
+try_prepare_source_disk:
+    call read_src_boot_sector
+    jc .fail
+    call verify_source_boot_signature
+    jc .fail
+    clc
+    ret
+.fail:
+    stc
+    ret
+
+; Validate source boot sector signature.
+; Accepts:
+;  1) New explicit signature at 0x1F0 ("SEOLSIG!")
+;  2) Legacy Seolsem BPB identity (OEM/LABEL/FSTYPE)
+; Uses boot sector currently stored in BUF_SEG.
+verify_source_boot_signature:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push ds
+    push es
+
+    mov ax, BUF_SEG
+    mov es, ax
+
+    ; Basic boot signature guard.
+    cmp word [es:510], 0xAA55
+    jne .legacy
+
+    ; New explicit signature marker.
+    push cs
+    pop ds
+    mov si, src_boot_magic
+    mov di, SRC_BOOT_MAGIC_OFS
+    mov cx, SRC_BOOT_MAGIC_LEN
+.sig_loop:
+    cmp cx, 0
+    je .ok
+    mov al, [es:di]
+    cmp al, [ds:si]
+    jne .legacy
+    inc di
+    inc si
+    dec cx
+    jmp .sig_loop
+
+.legacy:
+    ; Backward compatibility with older Seolsem images.
+    push cs
+    pop ds
+
+    mov si, src_oem_legacy
+    mov di, 0x0003
+    mov cx, 8
+    call cmp_ds_es_bytes
+    jc .fail
+
+    mov si, src_label_legacy
+    mov di, 0x002B
+    mov cx, 11
+    call cmp_ds_es_bytes
+    jc .fail
+
+    mov si, src_fstype_legacy
+    mov di, 0x0036
+    mov cx, 8
+    call cmp_ds_es_bytes
+    jc .fail
+
+.ok:
+    clc
+    jmp .ret
+.fail:
+    stc
+.ret:
+    pop es
+    pop ds
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Compare DS:SI and ES:DI for CX bytes. CF=0 when equal.
+cmp_ds_es_bytes:
+    push ax
+.loop:
+    cmp cx, 0
+    je .same
+    mov al, [ds:si]
+    cmp al, [es:di]
+    jne .diff
+    inc si
+    inc di
+    dec cx
+    jmp .loop
+.same:
+    clc
+    pop ax
+    ret
+.diff:
+    stc
+    pop ax
+    ret
+
 read_src_boot_sector:
     push ax
     push bx
@@ -1735,6 +2738,78 @@ copy_used_clusters:
 ; CF=1 on failure.
 ; (install_fs removed - unused FAT12 logic)
 
+; Validate source floppy/root contents before destructive HDD writes.
+; Requires source BPB/layout fields to be parsed.
+; CF=0 when KERNEL.BIN, XENV.ENV and BIN directory exist.
+verify_source_seolsem_image:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push ds
+    push es
+
+    push cs
+    pop ds
+
+    call verify_source_boot_signature
+    jc .fail
+
+    mov ax, [src_root_dir_sectors]
+    test ax, ax
+    jz .fail
+
+    mov ax, SRC_ROOT_SEG
+    mov es, ax
+    xor bx, bx
+    xor dx, dx
+    mov ax, [src_root_start_lba]
+    push ax
+    xor ax, ax
+    mov al, [src_drive]
+    mov si, ax
+    pop ax
+    mov cx, [src_root_dir_sectors]
+    call read_sectors_lba32
+    jc .fail
+
+    mov si, name_kernel11
+    call find_root_entry
+    jc .fail
+    mov al, [es:di+11]
+    test al, 0x10
+    jnz .fail
+
+    mov si, name_env11
+    call find_root_entry
+    jc .fail
+    mov al, [es:di+11]
+    test al, 0x10
+    jnz .fail
+
+    mov si, name_bin11
+    call find_root_entry
+    jc .fail
+    mov al, [es:di+11]
+    test al, 0x10
+    jz .fail
+
+    clc
+    jmp .ret
+
+.fail:
+    stc
+.ret:
+    pop es
+    pop ds
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
 
 
 
@@ -2209,6 +3284,18 @@ write_dst_fat_copies:
     dec cx
     jnz .wsec
     inc byte [tmp_fat_index]
+    ; Animate status
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    call ui_status_tick
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
     jmp .fat_loop
 .ok:
     clc
@@ -2248,7 +3335,22 @@ write_dst_root:
     add ax, 1
     adc dx, 0
     dec cx
-    jnz .wloop
+    
+    ; Animate status
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    call ui_status_tick
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+
+    cmp cx, 0
+    jne .wloop
     clc
     jmp .ret
 .fail:
@@ -2550,6 +3652,20 @@ copy_file_to_dst:
 .src_adv_done:
 
     dec bp
+    
+    ; Animate status
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    call ui_status_tick
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+
     jmp .loop
 
 .ok:
@@ -2571,11 +3687,23 @@ copy_file_to_dst:
 ; Data / constants
 ; --------------------------
 
-LINE_BUF_MAX equ 8
+LINE_BUF_MAX equ 9
+MAX_INSTALL_USERS equ 7
 line_buf times LINE_BUF_MAX db 0
+
+; UI input cursor state for read_line_upper
+ui_in_row  db 0
+ui_in_col  db 0
+ui_in_col0 db 0
+ui_in_attr db 0
+
+; Installer UI progress state
+ui_done_mask dw 0
+ui_cur_step  db 0
 
 ; BIOS geometry
 src_drive db INSTALL_DRIVE
+src_retry_left db 0
 src_spt   dw 0
 src_heads dw 0
 src_cyls  dw 0
@@ -2644,8 +3772,19 @@ dst_data_abs_hi dw 0
 name_kernel11  db 'KERNEL  BIN'
 name_env11     db 'XENV    ENV'
 name_bin11     db 'BIN        '
+name_etc11     db 'ETC        '
+name_home11    db 'HOME       '
+name_passwd11  db 'PASSWD     '
 name_dot11     db '.          '
 name_dotdot11  db '..         '
+
+passwd_root_prefix db 'ROOT:0:/:',0
+passwd_home_prefix db '/HOME/',0
+passwd_crlf        db 13,10,0
+src_boot_magic     db 'SEOLSIG!'
+src_oem_legacy     db 'SEOLSEM '
+src_label_legacy   db 'SEOLSEM    '
+src_fstype_legacy  db 'FAT12   '
 
 ; Source file info (from swapped Seolsem floppy)
 src_kernel_cluster dw 0
@@ -2668,6 +3807,18 @@ dst_kernel_cluster  dw 0
 dst_kernel_clusters dw 0
 dst_env_cluster     dw 0
 dst_env_clusters    dw 0
+dst_etc_cluster     dw 0
+dst_home_cluster    dw 0
+dst_passwd_cluster  dw 0
+dst_passwd_size_lo  dw 0
+dst_passwd_size_hi  dw 0
+
+; Users to pre-create (additional users; ROOT is always included)
+inst_user_count     db 0
+inst_root_pass      times LINE_BUF_MAX db 0
+inst_user_names     times (MAX_INSTALL_USERS*LINE_BUF_MAX) db 0
+inst_user_passes    times (MAX_INSTALL_USERS*LINE_BUF_MAX) db 0
+inst_user_home_cluster times MAX_INSTALL_USERS dw 0
 
 ; BIN directory entries
 bin_file_count      db 0
@@ -3128,6 +4279,8 @@ install_fs_fat32:
     mov word [dst_next_cluster], 3
 
     ; ---- Find required files on source disk (FAT12 root) ----
+    mov si, ui_log_find_files
+    call ui_log_push
     mov si, name_kernel11
     call find_root_entry
     jc .missing_kernel
@@ -3174,6 +4327,8 @@ install_fs_fat32:
     jc .fail
     mov [dst_kernel_cluster], ax
 
+    mov si, ui_log_copy_kernel
+    call ui_log_push
     mov cx, [src_kernel_cluster]
     mov dx, [src_kernel_size_lo]
     mov si, [src_kernel_size_hi]
@@ -3181,6 +4336,8 @@ install_fs_fat32:
     mov bx, [dst_kernel_clusters]
     call copy_file_to_dst
     jc .fail
+    mov al, 65
+    call ui_progress
 
     ; ---- Allocate/copy XENV.ENV ----
     mov ax, [src_env_size_lo]
@@ -3192,6 +4349,8 @@ install_fs_fat32:
     jc .fail
     mov [dst_env_cluster], ax
 
+    mov si, ui_log_copy_env
+    call ui_log_push
     mov cx, [src_env_cluster]
     mov dx, [src_env_size_lo]
     mov si, [src_env_size_hi]
@@ -3199,8 +4358,12 @@ install_fs_fat32:
     mov bx, [dst_env_clusters]
     call copy_file_to_dst
     jc .fail
+    mov al, 70
+    call ui_progress
 
     ; ---- Allocate/copy BIN/* files ----
+    mov si, ui_log_copy_bin
+    call ui_log_push
     xor bp, bp
 .bin_loop:
     mov al, [bin_file_count]
@@ -3238,27 +4401,61 @@ install_fs_fat32:
     ; ---- Write BIN directory entries ----
     call write_dst_bin_dir
     jc .fail
+    or word [ui_done_mask], (1 << 4)
+    mov al, 85
+    call ui_progress
+
+    ; ---- Pre-create users (/ETC/PASSWD, /HOME) ----
+    mov byte [ui_cur_step], 5
+    mov bx, [ui_done_mask]
+    mov al, [ui_cur_step]
+    call ui_steps_render
+    mov si, ui_status_create_users
+    call ui_status
+    mov al, 90
+    call ui_progress
+    mov si, ui_log_create_users
+    call ui_log_push
+    call install_users_fat32
+    jc .fail
+    or word [ui_done_mask], (1 << 5)
 
     ; ---- Write FAT32 root directory (cluster 2) ----
+    mov byte [ui_cur_step], 6
+    mov bx, [ui_done_mask]
+    mov al, [ui_cur_step]
+    call ui_steps_render
+    mov si, ui_status_finalize
+    call ui_status
+    mov al, 95
+    call ui_progress
+    mov si, ui_log_finalize
+    call ui_log_push
     call write_root_dir_cluster_fat32
     jc .fail
+    or word [ui_done_mask], (1 << 6)
+    mov bx, [ui_done_mask]
+    mov al, [ui_cur_step]
+    call ui_steps_render
+    mov al, 100
+    call ui_progress
 
     clc
     jmp .ret
 
 .missing_kernel:
     mov si, msg_missing_kernel
-    call print_string
+    call ui_log_push
     stc
     jmp .ret
 .missing_env:
     mov si, msg_missing_env
-    call print_string
+    call ui_log_push
     stc
     jmp .ret
 .missing_bin:
     mov si, msg_missing_bin
-    call print_string
+    call ui_log_push
     stc
     jmp .ret
 .fail:
@@ -3436,6 +4633,705 @@ fat32_alloc_chain:
     pop bx
     ret
 
+; --------------------------
+; User pre-create helpers (FAT32)
+;   - Create /ETC, /HOME, and /ETC/PASSWD
+;   - Create /HOME/<USER> directories for users entered during install
+; --------------------------
+
+; Build 11-byte 8.3 name (no extension) from DS:SI into ES:DI.
+write_name11_from_str:
+    push ax
+    push bx
+    push cx
+    push si
+    push di
+    mov bx, di
+    mov cx, 8
+.base_loop:
+    mov al, [si]
+    cmp al, 0
+    je  .pad_base
+    mov [es:bx], al
+    inc si
+    inc bx
+    dec cx
+    jnz .base_loop
+    jmp .ext
+.pad_base:
+    mov al, ' '
+.pad_loop:
+    mov [es:bx], al
+    inc bx
+    dec cx
+    jnz .pad_loop
+.ext:
+    mov cx, 3
+    mov al, ' '
+.ext_loop:
+    mov [es:bx], al
+    inc bx
+    loop .ext_loop
+    pop di
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+append_zstring:
+    push ax
+.aloop:
+    lodsb
+    test al, al
+    jz   .adone
+    stosb
+    jmp  .aloop
+.adone:
+    pop ax
+    ret
+
+; Write unsigned AX as decimal to ES:DI (no NUL).
+utoa_dec_esdi:
+    push ax
+    push bx
+    push cx
+    push dx
+    cmp ax, 0
+    jne .conv
+    mov al, '0'
+    stosb
+    jmp .done
+.conv:
+    mov bx, 10
+    xor cx, cx
+.div_loop:
+    xor dx, dx
+    div bx                      ; AX=quot, DX=rem
+    push dx
+    inc cx
+    test ax, ax
+    jnz .div_loop
+.out_loop:
+    pop dx
+    add dl, '0'
+    mov al, dl
+    stosb
+    loop .out_loop
+.done:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Build PASSWD content into BUF_SEG and set dst_passwd_size_*.
+; OUT: AX=size, CF=1 on error.
+build_passwd_buf:
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push ds
+    push es
+
+    push cs
+    pop ds
+
+    call zero_buf512            ; ES=BUF_SEG (cleared)
+    mov ax, BUF_SEG
+    mov es, ax
+    xor di, di
+
+    mov si, passwd_root_prefix
+    call append_zstring
+    mov si, inst_root_pass
+    call append_zstring
+    mov si, passwd_crlf
+    call append_zstring
+
+    xor bx, bx                  ; user index
+.user_loop:
+    mov al, [inst_user_count]
+    xor ah, ah
+    cmp bx, ax
+    jae .done
+
+    mov al, bl
+    mov dl, LINE_BUF_MAX
+    mul dl                      ; AX = index * LINE_BUF_MAX
+    mov si, inst_user_names
+    add si, ax
+
+    call append_zstring          ; NAME
+    mov al, ':'
+    stosb
+
+    mov ax, bx
+    inc ax                       ; uid = index + 1
+    call utoa_dec_esdi
+    mov al, ':'
+    stosb
+
+    mov si, passwd_home_prefix   ; /HOME/
+    call append_zstring
+
+    mov al, bl
+    mov dl, LINE_BUF_MAX
+    mul dl
+    mov si, inst_user_names
+    add si, ax
+    call append_zstring          ; NAME again
+
+    mov al, ':'
+    stosb
+    mov al, bl
+    mov dl, LINE_BUF_MAX
+    mul dl
+    mov si, inst_user_passes
+    add si, ax
+    call append_zstring          ; PASSWORD
+
+    mov si, passwd_crlf
+    call append_zstring
+
+    inc bx
+    jmp .user_loop
+
+.done:
+    mov ax, di
+    mov [dst_passwd_size_lo], ax
+    mov word [dst_passwd_size_hi], 0
+    clc
+    jmp .ret
+.ret:
+    pop es
+    pop ds
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    ret
+
+; Write BUF_SEG (first sector) into dst_passwd_cluster, zero remaining sectors in the cluster.
+; CF=1 on error.
+write_passwd_cluster:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push es
+
+    mov ax, [dst_passwd_cluster]
+    call dst_cluster_to_abs_lba
+    mov [tmp_lba_lo], ax
+    mov [tmp_lba_hi], dx
+
+    xor cx, cx
+    mov cl, [dst_sec_per_clus]
+
+    ; First sector contains content (already zero-padded)
+    mov ax, BUF_SEG
+    mov es, ax
+    xor bx, bx
+    mov ax, [tmp_lba_lo]
+    mov dx, [tmp_lba_hi]
+    mov si, DST_DRIVE
+    call write_sector_lba32
+    jc .fail
+
+    inc word [tmp_lba_lo]
+    jnz .no_c1
+    inc word [tmp_lba_hi]
+.no_c1:
+    dec cx
+    jz  .ok
+
+.zero_loop:
+    call zero_buf512
+    mov ax, BUF_SEG
+    mov es, ax
+    xor bx, bx
+    mov ax, [tmp_lba_lo]
+    mov dx, [tmp_lba_hi]
+    mov si, DST_DRIVE
+    call write_sector_lba32
+    jc .fail
+
+    inc word [tmp_lba_lo]
+    jnz .no_c2
+    inc word [tmp_lba_hi]
+.no_c2:
+    dec cx
+    jnz .zero_loop
+.ok:
+    clc
+    jmp .ret
+.fail:
+    stc
+.ret:
+    pop es
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Write a minimal directory cluster with '.' and '..'.
+; IN: AX=dir_cluster, BX=parent_cluster (0 allowed). CF=1 on error.
+write_empty_dir_cluster:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+    push ds
+    push es
+
+    push cs
+    pop ds
+
+    mov bp, ax                  ; dir cluster
+    mov ax, bp
+    call dst_cluster_to_abs_lba
+    mov [tmp_dst_lba_lo], ax
+    mov [tmp_dst_lba_hi], dx
+
+    xor cx, cx
+    mov cl, [dst_sec_per_clus]
+
+    call zero_buf512
+    mov ax, BUF_SEG
+    mov es, ax
+
+    ; '.'
+    mov di, 0
+    mov si, name_dot11
+    push cx
+    mov cx, 11
+    rep movsb
+    pop cx
+    mov byte [es:0+11], 0x10
+    mov word [es:0+20], 0
+    mov ax, bp
+    mov word [es:0+26], ax
+
+    ; '..'
+    mov di, 32
+    mov si, name_dotdot11
+    push cx
+    mov cx, 11
+    rep movsb
+    pop cx
+    mov byte [es:32+11], 0x10
+    mov word [es:32+20], 0
+    mov ax, bx
+    mov word [es:32+26], ax
+
+    ; Write first sector
+    mov ax, BUF_SEG
+    mov es, ax
+    xor bx, bx
+    mov ax, [tmp_dst_lba_lo]
+    mov dx, [tmp_dst_lba_hi]
+    mov si, DST_DRIVE
+    call write_sector_lba32
+    jc .fail
+
+    inc word [tmp_dst_lba_lo]
+    jnz .no_c1
+    inc word [tmp_dst_lba_hi]
+.no_c1:
+    dec cx
+    jz  .ok
+
+.rest:
+    call zero_buf512
+    mov ax, BUF_SEG
+    mov es, ax
+    xor bx, bx
+    mov ax, [tmp_dst_lba_lo]
+    mov dx, [tmp_dst_lba_hi]
+    mov si, DST_DRIVE
+    call write_sector_lba32
+    jc .fail
+
+    inc word [tmp_dst_lba_lo]
+    jnz .no_c2
+    inc word [tmp_dst_lba_hi]
+.no_c2:
+    dec cx
+    jnz .rest
+.ok:
+    clc
+    jmp .ret
+.fail:
+    stc
+.ret:
+    pop es
+    pop ds
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Write /ETC directory cluster with PASSWD entry.
+; CF=1 on error.
+write_etc_dir_cluster:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push ds
+    push es
+
+    push cs
+    pop ds
+
+    mov ax, [dst_etc_cluster]
+    call dst_cluster_to_abs_lba
+    mov [tmp_dst_lba_lo], ax
+    mov [tmp_dst_lba_hi], dx
+
+    xor cx, cx
+    mov cl, [dst_sec_per_clus]
+
+    call zero_buf512
+    mov ax, BUF_SEG
+    mov es, ax
+
+    ; '.'
+    mov di, 0
+    mov si, name_dot11
+    push cx
+    mov cx, 11
+    rep movsb
+    pop cx
+    mov byte [es:0+11], 0x10
+    mov word [es:0+20], 0
+    mov ax, [dst_etc_cluster]
+    mov word [es:0+26], ax
+
+    ; '..' (root => 0)
+    mov di, 32
+    mov si, name_dotdot11
+    push cx
+    mov cx, 11
+    rep movsb
+    pop cx
+    mov byte [es:32+11], 0x10
+    mov word [es:32+20], 0
+    mov word [es:32+26], 0
+
+    ; PASSWD
+    mov di, 64
+    mov si, name_passwd11
+    push cx
+    mov cx, 11
+    rep movsb
+    pop cx
+    mov byte [es:64+11], 0x20
+    mov word [es:64+20], 0
+    mov ax, [dst_passwd_cluster]
+    mov word [es:64+26], ax
+    mov ax, [dst_passwd_size_lo]
+    mov word [es:64+28], ax
+    mov ax, [dst_passwd_size_hi]
+    mov word [es:64+30], ax
+
+    ; Write first sector
+    mov ax, BUF_SEG
+    mov es, ax
+    xor bx, bx
+    mov ax, [tmp_dst_lba_lo]
+    mov dx, [tmp_dst_lba_hi]
+    mov si, DST_DRIVE
+    call write_sector_lba32
+    jc .fail
+
+    inc word [tmp_dst_lba_lo]
+    jnz .no_c1
+    inc word [tmp_dst_lba_hi]
+.no_c1:
+    dec cx
+    jz  .ok
+
+.rest:
+    call zero_buf512
+    mov ax, BUF_SEG
+    mov es, ax
+    xor bx, bx
+    mov ax, [tmp_dst_lba_lo]
+    mov dx, [tmp_dst_lba_hi]
+    mov si, DST_DRIVE
+    call write_sector_lba32
+    jc .fail
+
+    inc word [tmp_dst_lba_lo]
+    jnz .no_c2
+    inc word [tmp_dst_lba_hi]
+.no_c2:
+    dec cx
+    jnz .rest
+.ok:
+    clc
+    jmp .ret
+.fail:
+    stc
+.ret:
+    pop es
+    pop ds
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Write /HOME directory cluster with user directories.
+; CF=1 on error.
+write_home_dir_cluster:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+    push ds
+    push es
+
+    push cs
+    pop ds
+
+    mov ax, [dst_home_cluster]
+    call dst_cluster_to_abs_lba
+    mov [tmp_dst_lba_lo], ax
+    mov [tmp_dst_lba_hi], dx
+
+    xor cx, cx
+    mov cl, [dst_sec_per_clus]
+
+    call zero_buf512
+    mov ax, BUF_SEG
+    mov es, ax
+
+    ; '.'
+    mov di, 0
+    mov si, name_dot11
+    push cx
+    mov cx, 11
+    rep movsb
+    pop cx
+    mov byte [es:0+11], 0x10
+    mov word [es:0+20], 0
+    mov ax, [dst_home_cluster]
+    mov word [es:0+26], ax
+
+    ; '..' (root => 0)
+    mov di, 32
+    mov si, name_dotdot11
+    push cx
+    mov cx, 11
+    rep movsb
+    pop cx
+    mov byte [es:32+11], 0x10
+    mov word [es:32+20], 0
+    mov word [es:32+26], 0
+
+    xor bp, bp                  ; user index
+.u_loop:
+    mov al, [inst_user_count]
+    xor ah, ah
+    cmp bp, ax
+    jae .write
+
+    ; entry offset = (2 + index) * 32
+    mov ax, bp
+    add ax, 2
+    shl ax, 5
+    mov di, ax
+
+    ; name from inst_user_names[index]
+    mov ax, bp
+    mov dl, LINE_BUF_MAX
+    mul dl
+    mov si, inst_user_names
+    add si, ax
+    push di
+    call write_name11_from_str
+    pop di
+
+    mov byte [es:di+11], 0x10
+    mov word [es:di+20], 0
+    mov bx, bp
+    shl bx, 1
+    mov ax, [inst_user_home_cluster + bx]
+    mov word [es:di+26], ax
+
+    inc bp
+    jmp .u_loop
+
+.write:
+    ; Write first sector
+    mov ax, BUF_SEG
+    mov es, ax
+    xor bx, bx
+    mov ax, [tmp_dst_lba_lo]
+    mov dx, [tmp_dst_lba_hi]
+    mov si, DST_DRIVE
+    call write_sector_lba32
+    jc .fail
+
+    inc word [tmp_dst_lba_lo]
+    jnz .no_c1
+    inc word [tmp_dst_lba_hi]
+.no_c1:
+    dec cx
+    jz  .ok
+
+.rest:
+    call zero_buf512
+    mov ax, BUF_SEG
+    mov es, ax
+    xor bx, bx
+    mov ax, [tmp_dst_lba_lo]
+    mov dx, [tmp_dst_lba_hi]
+    mov si, DST_DRIVE
+    call write_sector_lba32
+    jc .fail
+
+    inc word [tmp_dst_lba_lo]
+    jnz .no_c2
+    inc word [tmp_dst_lba_hi]
+.no_c2:
+    dec cx
+    jnz .rest
+.ok:
+    clc
+    jmp .ret
+.fail:
+    stc
+.ret:
+    pop es
+    pop ds
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; Main entry: allocate clusters + write /ETC, /HOME, PASSWD and user home dirs.
+; CF=1 on error.
+install_users_fat32:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+    push ds
+
+    push cs
+    pop ds
+
+    ; /ETC
+    mov ax, 1
+    call fat32_alloc_chain
+    jc .fail
+    mov [dst_etc_cluster], ax
+
+    ; /HOME
+    mov ax, 1
+    call fat32_alloc_chain
+    jc .fail
+    mov [dst_home_cluster], ax
+
+    ; /ETC/PASSWD (small; 1 cluster)
+    mov ax, 1
+    call fat32_alloc_chain
+    jc .fail
+    mov [dst_passwd_cluster], ax
+
+    ; Allocate /HOME/<USER> clusters
+    xor bp, bp
+.alloc_loop:
+    mov al, [inst_user_count]
+    xor ah, ah
+    cmp bp, ax
+    jae .alloc_done
+    mov ax, 1
+    call fat32_alloc_chain
+    jc .fail
+    mov di, bp
+    shl di, 1
+    mov [inst_user_home_cluster + di], ax
+    inc bp
+    jmp .alloc_loop
+.alloc_done:
+
+    ; PASSWD content -> BUF_SEG
+    call build_passwd_buf
+    jc .fail
+
+    call write_passwd_cluster
+    jc .fail
+
+    ; Create user home directories (empty)
+    xor bp, bp
+.home_dirs:
+    mov al, [inst_user_count]
+    xor ah, ah
+    cmp bp, ax
+    jae .dirs_done
+    mov di, bp
+    shl di, 1
+    mov ax, [inst_user_home_cluster + di]
+    mov bx, [dst_home_cluster]
+    call write_empty_dir_cluster
+    jc .fail
+    inc bp
+    jmp .home_dirs
+.dirs_done:
+
+    call write_home_dir_cluster
+    jc .fail
+
+    call write_etc_dir_cluster
+    jc .fail
+
+    clc
+    jmp .ret
+.fail:
+    stc
+.ret:
+    pop ds
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
 ; Write FAT32 root directory entries to root cluster (cluster 2).
 ; Requires dst_data_abs_lo/hi to point at cluster 2 start LBA.
 write_root_dir_cluster_fat32:
@@ -3493,6 +5389,26 @@ write_root_dir_cluster_fat32:
     mov ax, [dst_bin_cluster]
     mov word [es:64+26], ax
 
+    ; Entry 3: ETC (directory)
+    mov di, 96
+    mov si, name_etc11
+    mov cx, 11
+    rep movsb
+    mov byte [es:96+11], 0x10
+    mov word [es:96+20], 0
+    mov ax, [dst_etc_cluster]
+    mov word [es:96+26], ax
+
+    ; Entry 4: HOME (directory)
+    mov di, 128
+    mov si, name_home11
+    mov cx, 11
+    rep movsb
+    mov byte [es:128+11], 0x10
+    mov word [es:128+20], 0
+    mov ax, [dst_home_cluster]
+    mov word [es:128+26], ax
+
     ; Write first sector of root cluster (rest is already zeroed by init_root_cluster)
     mov ax, BUF_SEG
     mov es, ax
@@ -3529,10 +5445,85 @@ mbr_template:
     incbin "build/mbr.bin"
 
 ; Messages
+; TUI strings
+ui_status_confirm     db 'Confirm installation',0
+ui_status_type_yes    db 'Type YES to confirm',0
+ui_status_bad_yes     db 'Confirmation failed',0
+ui_status_users       db 'User setup (optional)',0
+ui_status_swap        db 'Swap to Seolsem disk and press any key',0
+ui_status_detect      db 'Detecting disks...',0
+ui_status_partition   db 'Partitioning HDD...',0
+ui_status_format      db 'Formatting FAT32...',0
+ui_status_copy_boot   db 'Copying bootloader...',0
+ui_status_copy_files  db 'Copying system files...',0
+ui_status_create_users db 'Creating users...',0
+ui_status_finalize    db 'Finalizing...',0
+ui_status_cancel      db 'Cancelled.',0
+ui_status_reboot      db 'Press any key to reboot...',0
+
+ui_err_disk           db 'Disk error.',0
+ui_err_bpb            db 'Bad source BPB.',0
+ui_err_source         db 'Source disk is not a Seolsem image.',0
+ui_err_stage2         db 'Stage2 too large; HDD boot will fail.',0
+ui_err_layout         db 'Layout calculation failed.',0
+ui_err_install        db 'Install failed.',0
+
+ui_log_confirm        db 'Warning: this will erase HDD data.',0
+ui_log_cancel         db 'Installation cancelled.',0
+ui_log_start          db 'Starting installation...',0
+ui_log_hdd_geom       db 'Detect HDD geometry',0
+ui_log_hdd_size       db 'Detect HDD size',0
+ui_log_src_try_b      db 'Checking system disk in drive B:',0
+ui_log_src_retry      db 'Source disk not valid, retrying...',0
+ui_log_swap           db 'Swap to system disk now.',0
+ui_log_src_geom       db 'Detect source geometry',0
+ui_log_parse_bpb      db 'Parse source BPB',0
+ui_log_calc_src       db 'Compute source layout',0
+ui_log_validate_src   db 'Validate Seolsem source image',0
+ui_log_calc_dst       db 'Compute destination layout',0
+ui_log_write_mbr      db 'Write MBR',0
+ui_log_write_vbr      db 'Write VBR',0
+ui_log_write_fsinfo   db 'Write FSInfo',0
+ui_log_clear_fat      db 'Clear FAT tables',0
+ui_log_init_root      db 'Init root directory',0
+ui_log_copy_boot      db 'Copy reserved sectors',0
+ui_log_load_src       db 'Load source FAT/root',0
+ui_log_install        db 'Copy files',0
+ui_log_done           db 'Success. Reboot now.',0
+
+ui_log_find_files     db 'Find required files',0
+ui_log_copy_kernel    db 'Copy KERNEL.BIN',0
+ui_log_copy_env       db 'Copy XENV.ENV',0
+ui_log_copy_bin       db 'Copy BIN/*',0
+ui_log_create_users   db 'Create /ETC/PASSWD and /HOME',0
+ui_log_finalize       db 'Write root directory',0
+
+ui_confirm_title      db 'Install Seolsem',0
+ui_confirm_line1      db 'This will ERASE all data on the first HDD.',0
+ui_confirm_line2      db 'Press Y to continue, N to cancel.',0
+ui_confirm_q          db 'Install to HDD? (Y/N)',0
+ui_confirm_type       db 'Type YES to confirm:',0
+
+ui_users_title        db 'User Setup',0
+ui_users_q            db 'Optional: add user accounts now.',0
+ui_users_opt          db '[N]o (root only)    [Y]es (add users)',0
+ui_users_root_pw      db 'Root password (blank=none):',0
+ui_users_list         db 'Users:',0
+ui_users_name         db 'Username (1-8):',0
+ui_users_pass         db 'Password (1-8):',0
+ui_users_invalid      db 'Invalid username.',0
+ui_users_invalid_pw   db 'Invalid password.',0
+ui_users_dup          db 'User already added.',0
+ui_users_limit        db 'User limit reached.',0
+
 msg_banner       db 'Seolsem Installer (FAT32 Support)',13,10,0
-msg_hdd_sectors  db 'HDD Sectors: ',0
 msg_confirm1     db 'Install to HDD? (Y/N): ',0
 msg_confirm2     db 'Type YES to confirm data loss: ',0
+msg_user_prompt  db 'Add user accounts now? (Y/N): ',0
+msg_user_name    db 'Username (<=8, blank=done): ',0
+msg_invalid_user db 'Invalid username.',0
+msg_duplicate_user db 'User already added.',0
+msg_user_limit   db 'User list is full.',0
 msg_swap         db 'Swap to Seolsem Disk and press Key...',0
 msg_copy_reserved db 'Copying system...',13,10,0
 msg_install_fs   db 'Formatting FAT32 & Copying...',13,10,0
@@ -3615,7 +5606,6 @@ copy_stage2_to_hdd:
     loop .loop
 
 .done:
-    call print_crlf
     clc
     ret
 .fail:

@@ -1,9 +1,34 @@
 %ifndef __API__
 %define __API__
 
+[bits 16]
+
+; ============================================================
+; Kernel API (16-bit Protected Mode)
+;   - VGA text output (0xB8000 via PM_VIDEO_SEL)
+;   - i8042 keyboard polling (scancode set 1, minimal US map)
+;   - No BIOS INT calls (unavailable in protected mode)
+; ============================================================
+
 segment _TEXT class=CODE use16
 
 %define INPUT_MAX 64
+%define KBD_QUEUE_SIZE 32
+
+; Selectors set up by kernel_entry.asm (GDT)
+%define PM_VIDEO_SEL 0x18
+
+; VGA text-mode cursor control (CRTC)
+%define VGA_CRTC_INDEX 0x3D4
+%define VGA_CRTC_DATA  0x3D5
+%define VGA_CURSOR_LOW 0x0F
+%define VGA_CURSOR_HIGH 0x0E
+%define VGA_CURSOR_START 0x0A
+%define VGA_CURSOR_END   0x0B
+
+; i8042 keyboard controller
+%define KBD_STATUS 0x64
+%define KBD_DATA   0x60
 
 global _clear_screen
 global _print_message
@@ -14,202 +39,31 @@ global _write_char
 global _sync_ds
 global _enable_irq
 global _disable_irq
-global _dgroup_seg
+global _kbd_isr
 
+; ------------------------------------------------------------
+; Screen
+; ------------------------------------------------------------
 _clear_screen:
     pusha
     push es
-    mov  ax, 0xB800
+
+    mov  ax, PM_VIDEO_SEL
     mov  es, ax
-    mov  di, 0
-    mov  ax, 0x0720         ; 공백 문자 + 0x07 속성
+    xor  di, di
+    mov  ax, 0x0720         ; space + gray
     mov  cx, 80*25
     cld
-.cls_loop:
-    stosw
-    loop .cls_loop
-    mov  word [ss:line], 0
-    mov  word [ss:di_pos], 0
+    rep  stosw
+
+    mov  word [_line], 0
+    mov  word [_di_pos], 0
     xor  dx, dx
     call set_cursor_hw
+    call show_cursor_hw
+
     pop  es
     popa
-    ret
-
-_sync_ds:
-    mov  ax, ss
-    mov  ds, ax
-    ret
-
-_enable_irq:
-    sti
-    ret
-
-_disable_irq:
-    cli
-    ret
-
-_wait_prompt:
-    push bp
-    mov  bp, sp
-    pusha               ; AX,CX,DX,BX,SP,BP,SI,DI 저장
-    push ds
-    push es
-
-    ; DS may be clobbered by IRQ handlers; use SS (DGROUP) for data.
-    mov  ax, ss
-    mov  ds, ax
-
-    ; --- 비디오 메모리 세그먼트 설정 ---
-    mov  ax, 0xB800
-    mov  es, ax
-    cld
-
-    ; --- 현재 줄 검사(+스크롤) ---
-    mov  ax, [ss:line]
-    cmp  ax, 25
-    jb   .line_ok
-    call scroll_screen
-    mov  ax, ss
-    mov  ds, ax
-    mov  ax, 0xB800
-    mov  es, ax
-    mov  word [ss:line], 24
-.line_ok:
-
-    ; --- 이번 줄 시작 DI 계산: di = line * 160 ---
-    mov  ax, [ss:line]
-    mov  bx, 160
-    mul  bx
-    mov  [ss:di_pos], ax
-    mov  di, [ss:di_pos]
-
-    ; --- 메시지 포인터 가져오기 ---
-    mov  si, [bp+4]
-.print_loop:
-    mov  cl, [ss:si]
-    cmp  cl, 0
-    je   .start_poll
-    mov  [es:di], cl
-    mov  byte [es:di+1], 0x07
-    inc  si
-    add  di, 2
-    jmp  .print_loop
-
-.start_poll:
-    mov  bx, di
-    mov  dx, [ss:di_pos]
-    add  dx, 160
-    mov  [ss:line_end], dx
-
-    mov  si, [bp+6]         ; buf
-    mov  cx, si
-    mov  byte [ss:si], 0    ; 버퍼 시작을 항상 NUL로
-
-.update_cursor:
-    push bx
-    mov  ax, di
-    cmp  ax, [ss:line_end]
-    jne  .cursor_calc
-    sub  ax, 2
-.cursor_calc:
-    xor  dx, dx
-    mov  bx, 160
-    div  bx                 ; AX=ROW, DX=OFFSET
-    mov  bx, dx             ; save remainder (offset)
-    mov  dh, al             ; row
-    mov  ax, bx
-    shr  ax, 1
-    mov  dl, al
-    call set_cursor_hw
-    pop  bx
-.poll:
-.wait_key:
-    mov  ah, 01h
-    push bx
-    push cx
-    push dx
-    push si
-    push di
-    push ds
-    push es
-    int  16h
-    pop  es
-    pop  ds
-    pop  di
-    pop  si
-    pop  dx
-    pop  cx
-    pop  bx
-    jz   .wait_key
-
-    xor  ah, ah
-    push bx
-    push cx
-    push dx
-    push si
-    push di
-    push ds
-    push es
-    int  16h
-    pop  es
-    pop  ds
-    pop  di
-    pop  si
-    pop  dx
-    pop  cx
-    pop  bx
-
-    cmp  al, 13
-    je   .end_line
-
-    cmp  al, 8
-    je   .backspace
-
-    test al, al
-    jz   .poll
-
-    mov  dx, [ss:line_end]
-    cmp  di, dx
-    jae  .poll
-
-    mov  [es:di], al
-    mov  byte [es:di+1], 0x07
-    add  di, 2
-
-    mov  [ss:si], al
-    inc  si
-    mov  byte [ss:si], 0
-    jmp  .update_cursor
-
-.backspace:
-    cmp  di, bx
-    jbe  .poll
-    sub  di, 2
-    mov  byte [es:di], 0x20
-    mov  byte [es:di+1], 0x07
-
-    cmp  si, cx
-    jbe  .poll
-    dec  si
-    mov  byte [ss:si], 0
-    jmp  .update_cursor
-
-.end_line:
-    inc  word [ss:line]
-    pop  es
-    pop  ds
-    popa
-    pop  bp
-    ret
-
-_read_key:
-    push ds
-    push es
-    xor ah, ah
-    int 16h
-    pop es
-    pop ds
     ret
 
 _set_cursor:
@@ -226,10 +80,9 @@ _write_char:
     mov  bp, sp
     push ax
     push bx
-    push dx
     push es
 
-    mov  ax, 0xB800
+    mov  ax, PM_VIDEO_SEL
     mov  es, ax
 
     mov  ax, [bp+4]         ; row
@@ -245,45 +98,531 @@ _write_char:
     mov  [es:di], ax
 
     pop  es
-    pop  dx
     pop  bx
     pop  ax
     pop  bp
     ret
+
+; ------------------------------------------------------------
+; DS/IRQ helpers
+; ------------------------------------------------------------
+_sync_ds:
+    mov  ax, ss
+    mov  ds, ax
+    ret
+
+_enable_irq:
+    sti
+    ret
+
+_disable_irq:
+    cli
+    ret
+
+; ------------------------------------------------------------
+; Keyboard
+; ------------------------------------------------------------
+; UINT16 read_key(void)
+; returns AX = (scan << 8) | ascii
+_read_key:
+    push bx
+    push cx
+    push dx
+    push ds
+
+    ; Use SS as DGROUP for keyboard state vars.
+    mov  ax, ss
+    mov  ds, ax
+
+.wait_key:
+    ; 1) Prefer queued IRQ events (fast path)
+    cli
+    mov  bl, [_kbd_q_head]
+    cmp  bl, [_kbd_q_tail]
+    jne  .have_key
+    sti
+
+    ; 2) Poll i8042 as a fallback (works even if IRQ/IDT is misconfigured)
+.poll:
+    in   al, KBD_STATUS
+    test al, 0x01
+    jz   .wait_key
+    test al, 0x20                 ; AUX data (mouse) -> consume and ignore
+    jnz  .poll_consume
+    cli
+    in   al, KBD_DATA
+    ; Minimal translation/state update mirroring ISR rules:
+    ; - handle 0xE0 prefix
+    ; - update shift/ctrl state
+    ; - ignore break codes
+    ; - map to ASCII via tables
+    cmp  al, 0xE0
+    jne  .p_not_ext
+    mov  byte [_kbd_ext], 1
+    sti
+    jmp  .wait_key
+.p_not_ext:
+    cmp  al, 0x2A
+    je   .p_shift_on
+    cmp  al, 0x36
+    je   .p_shift_on
+    cmp  al, 0xAA
+    je   .p_shift_off
+    cmp  al, 0xB6
+    je   .p_shift_off
+    cmp  al, 0x1D
+    je   .p_ctrl_on
+    cmp  al, 0x9D
+    je   .p_ctrl_off
+    test al, 0x80
+    jnz  .p_clear_ext
+
+    mov  ah, al                   ; scan
+    cmp  byte [_kbd_ext], 0
+    jne  .p_ext_key
+    xor  bx, bx
+    mov  bl, al
+    cmp  byte [_kbd_shift], 0
+    je   .p_unshift
+    mov  al, [cs:kbd_map_shift + bx]
+    jmp  .p_apply_ctrl
+.p_unshift:
+    mov  al, [cs:kbd_map + bx]
+.p_apply_ctrl:
+    cmp  byte [_kbd_ctrl], 0
+    je   .p_emit
+    cmp  al, 'A'
+    jb   .p_emit
+    cmp  al, 'Z'
+    jbe  .p_ctrl_map
+    cmp  al, 'a'
+    jb   .p_emit
+    cmp  al, 'z'
+    ja   .p_emit
+.p_ctrl_map:
+    and  al, 0x1F
+.p_emit:
+    mov  byte [_kbd_ext], 0
+    sti
+    jmp  .done
+
+.p_ext_key:
+    mov  byte [_kbd_ext], 0
+    xor  ax, ax
+    sti
+    jmp  .wait_key
+
+.p_shift_on:
+    mov  byte [_kbd_shift], 1
+    jmp  .p_clear_ext
+.p_shift_off:
+    mov  byte [_kbd_shift], 0
+    jmp  .p_clear_ext
+.p_ctrl_on:
+    mov  byte [_kbd_ctrl], 1
+    jmp  .p_clear_ext
+.p_ctrl_off:
+    mov  byte [_kbd_ctrl], 0
+    jmp  .p_clear_ext
+.p_clear_ext:
+    mov  byte [_kbd_ext], 0
+    sti
+    jmp  .wait_key
+
+.poll_consume:
+    in   al, KBD_DATA
+    jmp  .wait_key
+
+.have_key:
+    mov  bl, [_kbd_q_tail]
+    xor  bh, bh
+    shl  bx, 1
+    mov  ax, [_kbd_queue + bx]
+    mov  bl, [_kbd_q_tail]
+    inc  bl
+    and  bl, (KBD_QUEUE_SIZE - 1)
+    mov  [_kbd_q_tail], bl
+    sti
+
+.done:
+    pop  ds
+    pop  dx
+    pop  cx
+    pop  bx
+    ret
+
+; IRQ1 keyboard handler: push translated key events into ring buffer.
+_kbd_isr:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+    push ds
+    push es
+
+    mov  ax, ss
+    mov  ds, ax
+
+    ; Drain the controller output buffer.
+    ; Some keys emit multi-byte sequences; draining prevents missed edges.
+.drain:
+    in   al, KBD_STATUS
+    test al, 0x01
+    jz   .eoi
+    test al, 0x20                 ; AUX (mouse) data?
+    jz   .read_kbd
+    in   al, KBD_DATA             ; consume and ignore
+    jmp  .drain
+.read_kbd:
+    in   al, KBD_DATA
+
+    cmp  al, 0xE0
+    jne  .not_ext_prefix
+    mov  byte [_kbd_ext], 1
+    jmp  .drain
+.not_ext_prefix:
+
+    ; Shift press/release
+    cmp  al, 0x2A
+    je   .shift_on
+    cmp  al, 0x36
+    je   .shift_on
+    cmp  al, 0xAA
+    je   .shift_off
+    cmp  al, 0xB6
+    je   .shift_off
+
+    ; Ctrl press/release
+    cmp  al, 0x1D
+    je   .ctrl_on
+    cmp  al, 0x9D
+    je   .ctrl_off
+
+    ; Ignore break codes for regular keys
+    test al, 0x80
+    jnz  .clear_ext_only
+
+    ; AX = event (scan<<8 | ascii)
+    mov  ah, al
+    cmp  byte [_kbd_ext], 0
+    jne  .ext_key
+
+    xor  bx, bx
+    mov  bl, al
+    cmp  byte [_kbd_shift], 0
+    je   .use_unshift_isr
+    mov  al, [cs:kbd_map_shift + bx]
+    jmp  .apply_ctrl_isr
+.use_unshift_isr:
+    mov  al, [cs:kbd_map + bx]
+
+.apply_ctrl_isr:
+    cmp  byte [_kbd_ctrl], 0
+    je   .queue_event
+    cmp  al, 'A'
+    jb   .queue_event
+    cmp  al, 'Z'
+    jbe  .ctrl_map_isr
+    cmp  al, 'a'
+    jb   .queue_event
+    cmp  al, 'z'
+    ja   .queue_event
+.ctrl_map_isr:
+    and  al, 0x1F
+    jmp  .queue_event
+
+.ext_key:
+    mov  byte [_kbd_ext], 0
+    xor  al, al
+    jmp  .queue_event
+
+.queue_event:
+    mov  bl, [_kbd_q_head]
+    mov  cl, bl
+    inc  cl
+    and  cl, (KBD_QUEUE_SIZE - 1)
+    cmp  cl, [_kbd_q_tail]
+    je   .overflow
+    xor  bh, bh
+    shl  bx, 1
+    mov  [_kbd_queue + bx], ax
+    mov  [_kbd_q_head], cl
+    jmp  .drain
+
+.overflow:
+    mov  byte [_kbd_q_overflow], 1
+    jmp  .drain
+
+.shift_on:
+    mov  byte [_kbd_shift], 1
+    jmp  .clear_ext_only
+.shift_off:
+    mov  byte [_kbd_shift], 0
+    jmp  .clear_ext_only
+.ctrl_on:
+    mov  byte [_kbd_ctrl], 1
+    jmp  .clear_ext_only
+.ctrl_off:
+    mov  byte [_kbd_ctrl], 0
+    jmp  .clear_ext_only
+
+.clear_ext_only:
+    mov  byte [_kbd_ext], 0
+    jmp  .drain
+
+.eoi:
+    mov  al, 0x20
+    out  0x20, al
+    pop  es
+    pop  ds
+    pop  bp
+    pop  di
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    iret
+
+; ------------------------------------------------------------
+; Prompt input
+; ------------------------------------------------------------
+_wait_prompt:
+    push bp
+    mov  bp, sp
+    pusha
+    push ds
+    push es
+
+    mov  ax, ss
+    mov  ds, ax
+
+    mov  ax, PM_VIDEO_SEL
+    mov  es, ax
+    cld
+    call show_cursor_hw
+
+    ; --- current line check (+scroll) ---
+    mov  ax, [_line]
+    cmp  ax, 25
+    jb   .line_ok
+    call scroll_screen
+    mov  ax, ss
+    mov  ds, ax
+    mov  ax, PM_VIDEO_SEL
+    mov  es, ax
+    mov  word [_line], 24
+.line_ok:
+    mov  al, [_line]
+    mov  [_input_row], al
+    mov  byte [_input_col], 0
+
+    ; print prompt string
+    mov  si, [bp+4]
+.prompt_loop:
+    mov  cl, [ss:si]
+    cmp  cl, 0
+    je   .start_input
+    call .put_char_cl
+    inc  si
+    jmp  .prompt_loop
+
+.start_input:
+    mov  al, [_input_row]
+    mov  [_input_start_row], al
+    mov  al, [_input_col]
+    mov  [_input_start_col], al
+
+    mov  si, [bp+6]         ; buf
+    mov  cx, si             ; buf start
+    mov  byte [ss:si], 0
+
+.update_cursor:
+    mov  dh, [_input_row]
+    mov  dl, [_input_col]
+    call set_cursor_hw
+
+.poll:
+    call _read_key
+
+    cmp  al, 13
+    je   .end_line
+    cmp  al, 8
+    je   .backspace
+
+    cmp  al, 32
+    jb   .poll
+    cmp  al, 127
+    je   .poll
+
+    ; enforce input max (INPUT_MAX - 1)
+    push ax
+    mov  ax, si
+    sub  ax, cx
+    cmp  ax, (INPUT_MAX - 1)
+    pop  ax
+    jae  .poll
+
+    ; avoid writing beyond bottom-right cell
+    mov  bl, [_input_row]
+    cmp  bl, 24
+    jne  .store_char
+    mov  bl, [_input_col]
+    cmp  bl, 79
+    jae  .poll
+
+.store_char:
+    mov  bl, al
+    mov  cl, al
+    call .put_char_cl
+    mov  [ss:si], bl
+    inc  si
+    mov  byte [ss:si], 0
+    jmp  .update_cursor
+
+.backspace:
+    cmp  si, cx
+    jbe  .poll
+    mov  al, [_input_row]
+    cmp  al, [_input_start_row]
+    jne  .backspace_move
+    mov  al, [_input_col]
+    cmp  al, [_input_start_col]
+    jbe  .poll
+
+.backspace_move:
+    mov  al, [_input_col]
+    cmp  al, 0
+    jne  .backspace_same_row
+    mov  al, [_input_row]
+    cmp  al, 0
+    je   .poll
+    dec  byte [_input_row]
+    mov  byte [_input_col], 79
+    jmp  .backspace_erase
+
+.backspace_same_row:
+    dec  byte [_input_col]
+
+.backspace_erase:
+    call .calc_di
+    mov  byte [es:di], 0x20
+    mov  byte [es:di+1], 0x07
+    dec  si
+    mov  byte [ss:si], 0
+    jmp  .update_cursor
+
+.end_line:
+    mov  al, [_input_row]
+    inc  al
+    cmp  al, 25
+    jb   .line_set
+    call scroll_screen
+    mov  ax, ss
+    mov  ds, ax
+    mov  ax, PM_VIDEO_SEL
+    mov  es, ax
+    mov  al, 24
+.line_set:
+    xor  ah, ah
+    mov  [_line], ax
+    mov  dh, al
+    xor  dl, dl
+    call set_cursor_hw
+    pop  es
+    pop  ds
+    popa
+    pop  bp
+    ret
+
+.put_char_cl:
+    push ax
+    push di
+    call .calc_di
+    mov  [es:di], cl
+    mov  byte [es:di+1], 0x07
+
+    ; Advance cursor position
+    mov  al, [_input_col]
+    cmp  al, 79
+    jae  .at_right_edge
+    ; Not at right edge - just advance column
+    inc  byte [_input_col]
+    jmp  .advance_done
+
+.at_right_edge:
+    ; At column 79 (right edge)
+    mov  al, [_input_row]
+    cmp  al, 24
+    jae  .at_bottom_right
+    ; Not at bottom row - wrap to next line
+    mov  byte [_input_col], 0
+    inc  byte [_input_row]
+    jmp  .advance_done
+
+.at_bottom_right:
+    ; At row 24, col 79 - don't advance beyond screen
+    ; Keep cursor at (24, 79)
+    jmp  .advance_done
+
+.advance_done:
+    pop  di
+    pop  ax
+    ret
+
+.calc_di:
+    push ax
+    push bx
+    xor  ax, ax
+    mov  al, [_input_row]
+    mov  bx, 160
+    mul  bx
+    xor  bx, bx
+    mov  bl, [_input_col]
+    shl  bx, 1
+    add  ax, bx
+    mov  di, ax
+    pop  bx
+    pop  ax
+    ret
+
+; ------------------------------------------------------------
+; _print_message
+; ------------------------------------------------------------
 _print_message:
     push bp
     mov  bp, sp
     pusha
     push ds
     push es
+
     mov  ax, ss
     mov  ds, ax
 
-    ; 비디오 세그먼트
-    mov  ax, 0xB800
+    mov  ax, PM_VIDEO_SEL
     mov  es, ax
     mov  bl, 0
 
-    ; 줄 검사 및 스크롤
-    mov  ax, [ss:line]
+    mov  ax, [_line]
     cmp  ax, 25
     jb   .line_ok
     call scroll_screen
     mov  ax, ss
     mov  ds, ax
-    mov  ax, 0xB800
+    mov  ax, PM_VIDEO_SEL
     mov  es, ax
-    mov  word [ss:line], 24
+    mov  word [_line], 24
 .line_ok:
 
-    ; di = line * 160
-    mov  ax, [ss:line]
+    mov  ax, [_line]
     mov  bx, 160
     mul  bx
-    mov  [ss:di_pos], ax
-    mov  di, [ss:di_pos]
+    mov  [_di_pos], ax
+    mov  di, [_di_pos]
 
-    ; 인자: [bp+4] = msg 오프셋
     mov  si, [bp+4]
 
 .print_loop:
@@ -300,7 +639,7 @@ _print_message:
     add  di, 2
     mov  bl, 0
     mov  ax, di
-    sub  ax, [ss:di_pos]
+    sub  ax, [_di_pos]
     cmp  ax, 160
     jb   .print_loop
     jmp  .wrap
@@ -309,11 +648,11 @@ _print_message:
     inc  si
     jmp  .print_loop
 .carriage_return:
-    mov  ax, [ss:line]
+    mov  ax, [_line]
     mov  bx, 160
     mul  bx
-    mov  [ss:di_pos], ax
-    mov  di, [ss:di_pos]
+    mov  [_di_pos], ax
+    mov  di, [_di_pos]
     mov  bl, 1
     inc  si
     jmp  .print_loop
@@ -321,28 +660,28 @@ _print_message:
     call .advance_line
     jmp  .print_loop
 .advance_line:
-    inc  word [ss:line]
-    mov  ax, [ss:line]
+    inc  word [_line]
+    mov  ax, [_line]
     cmp  ax, 25
     jb   .advance_ok
     call scroll_screen
     mov  ax, ss
     mov  ds, ax
-    mov  ax, 0xB800
+    mov  ax, PM_VIDEO_SEL
     mov  es, ax
-    mov  word [ss:line], 24
+    mov  word [_line], 24
 .advance_ok:
-    mov  ax, [ss:line]
+    mov  ax, [_line]
     mov  bx, 160
     mul  bx
-    mov  [ss:di_pos], ax
-    mov  di, [ss:di_pos]
+    mov  [_di_pos], ax
+    mov  di, [_di_pos]
     mov  bl, 1
     ret
 .end:
     cmp  bl, 1
     je   .done
-    inc  word [ss:line]
+    inc  word [_line]
 .done:
     pop  es
     pop  ds
@@ -350,23 +689,75 @@ _print_message:
     pop  bp
     ret
 
+; DH=row, DL=col
+set_cursor_hw:
+    push ax
+    push bx
+    push dx
+
+    xor  ax, ax
+    mov  al, dh
+    mov  bx, 80
+    mul  bx                 ; AX = row*80
+    xor  bx, bx
+    mov  bl, dl
+    add  ax, bx             ; AX = pos
+    mov  bx, ax             ; BX = pos
+
+    mov  dx, VGA_CRTC_INDEX
+    mov  al, VGA_CURSOR_LOW
+    out  dx, al
+    mov  dx, VGA_CRTC_DATA
+    mov  al, bl
+    out  dx, al
+
+    mov  dx, VGA_CRTC_INDEX
+    mov  al, VGA_CURSOR_HIGH
+    out  dx, al
+    mov  dx, VGA_CRTC_DATA
+    mov  al, bh
+    out  dx, al
+
+    pop  dx
+    pop  bx
+    pop  ax
+    ret
+
+show_cursor_hw:
+    push dx
+    push ax
+    mov  dx, VGA_CRTC_INDEX
+    mov  al, VGA_CURSOR_START
+    out  dx, al
+    mov  dx, VGA_CRTC_DATA
+    mov  al, 0x0E
+    out  dx, al
+
+    mov  dx, VGA_CRTC_INDEX
+    mov  al, VGA_CURSOR_END
+    out  dx, al
+    mov  dx, VGA_CRTC_DATA
+    mov  al, 0x0F
+    out  dx, al
+    pop  ax
+    pop  dx
+    ret
+
 scroll_screen:
     pusha
     push ds
     push es
 
-    mov  ax, 0xB800
+    mov  ax, PM_VIDEO_SEL
     mov  es, ax
     mov  ds, ax
-    cld                     ; 문자열 명령은 정방향으로!
+    cld
 
-    ; 위로 한 줄 스크롤
-    mov  si, 160            ; src = 1번째 줄
-    mov  di, 0              ; dst = 0번째 줄
-    mov  cx, 24*80          ; 워드 개수(= 문자 수)
+    mov  si, 160
+    mov  di, 0
+    mov  cx, 24*80
     rep  movsw
 
-    ; 마지막 줄 클리어 (공백/회색)
     mov  di, 24*160
     mov  cx, 80
     mov  ax, 0x0720
@@ -377,54 +768,50 @@ scroll_screen:
     popa
     ret
 
-set_cursor_hw:
-    push ax
-    push bx
-    push cx
-    push dx
-    push si
-    push di
-    push ds
-    push es
-
-    mov  ah, 0x02            ; BIOS: set cursor position
-    mov  bh, 0x00            ; page 0
-    int  0x10
-
-    pop  es
-    pop  ds
-    pop  di
-    pop  si
-    pop  dx
-    pop  cx
-    pop  bx
-    pop  ax
-    ret
-
-bios_teletype:
-    pusha
-    push ds
-    push es
-    mov  ah, 0x0E
-    mov  bh, 0x00
-    mov  bl, 0x07
-    int  0x10
-    pop  es
-    pop  ds
-    popa
-    ret
-
-; DGROUP segment cached in code segment for reliable DS restore
-global _dgroup_seg_cs
-_dgroup_seg_cs dw 0
-
-; 맨 아래에
+; ------------------------------------------------------------
+; Data (in SS segment via DGROUP)
+; ------------------------------------------------------------
 segment _DATA class=DATA use16
-global _api_data_anchor
-_api_data_anchor db 0
-_dgroup_seg dw 0
-line        dw 0
-di_pos      dw 0
-line_end    dw 0
+
+global _line
+global _di_pos
+global _line_end
+global _kbd_shift
+global _kbd_ctrl
+global _kbd_ext
+
+_line       dw 0
+_di_pos     dw 0
+_line_end   dw 0
+_kbd_shift  db 0
+_kbd_ctrl   db 0
+_kbd_ext    db 0
+_input_col  db 0
+_input_row  db 0
+_input_start_col db 0
+_input_start_row db 0
+_kbd_q_head db 0
+_kbd_q_tail db 0
+_kbd_q_overflow db 0
+_kbd_queue  times KBD_QUEUE_SIZE dw 0
+
+; ------------------------------------------------------------
+; US keyboard scancode->ASCII map
+; ------------------------------------------------------------
+segment _TEXT
+
+kbd_map:
+    db 0,0,'1','2','3','4','5','6','7','8','9','0','-','=',8,9
+    db 'q','w','e','r','t','y','u','i','o','p','[',']',13,0,'a','s'
+    db 'd','f','g','h','j','k','l',';',39,'`',0,'\','z','x','c','v'
+    db 'b','n','m',',','.','/',0,'*',0,' ',0
+    times (128-($-kbd_map)) db 0
+
+kbd_map_shift:
+    db 0,0,'!','@','#','$','%','^','&','*','(',')','_','+',8,9
+    db 'Q','W','E','R','T','Y','U','I','O','P','{','}',13,0,'A','S'
+    db 'D','F','G','H','J','K','L',':','"','~',0,'|','Z','X','C','V'
+    db 'B','N','M','<','>','?',0,'*',0,' ',0
+    times (128-($-kbd_map_shift)) db 0
 
 %endif

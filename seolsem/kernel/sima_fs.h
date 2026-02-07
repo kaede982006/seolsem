@@ -31,6 +31,7 @@ typedef struct {
 BOOL fs_init(void);
 BOOL fs_cd(const char *path);
 BOOL fs_get_cwd(char *out, UINT16 out_cap);
+BOOL fs_make_abs_path(const char *path, char *out, UINT16 out_cap);
 
 BOOL fs_dir_open(const char *path, FS_DIR *out_dir);
 BOOL fs_dir_read(FS_DIR *dir, FS_DIRENT *out);

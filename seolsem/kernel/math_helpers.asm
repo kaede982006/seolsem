@@ -8,7 +8,7 @@
 
 global __U4M
 
-section .text
+segment _TEXT class=CODE use16
 
 ; Re-implementation from scratch calling convention safe
 ; Watcom: DX:AX * CX:BX -> DX:AX

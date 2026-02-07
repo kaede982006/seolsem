@@ -23,7 +23,7 @@ bpbHugeSectors    dd 0
 bsDriveNum        db 0
 bsReserved1       db 0
 bsBootSig         db 0x29
-bsVolID           dd 0x12345678
+bsVolID           dd 0x534D4C53
 bsVolLabel        db 'SEOLSEM    '
 bsFileSys         db 'FAT12   '
 

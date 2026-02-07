@@ -5,6 +5,7 @@ SHELL   := /bin/sh
 CC      := wcc
 AS      := nasm
 LD      := wlink
+PY      ?= python3
 
 OBJDIR  := build/obj
 BINDIR  := build/bin
@@ -14,9 +15,13 @@ INCDIR  := include
 # Flags (기존 플래그 유지 + 정리)
 #   -ms : small memory model
 #   -s  : strip
-#   -ecc, -1, -zl, -od, -d2, -i... : 기존 사용값 유지
+#   -ecc, -1, -zl, -os, -d0, -i... : 기존 사용값 유지/정리
 # ------------------------------
-CFLAGS  := -s -ecc -1 -ms -zl -od -d2 -i$(INCDIR)
+# Keep the kernel within the 64KiB segment window required by our 16-bit
+# protected-mode + small-model layout (CS/DS base = image base).
+# `-os` is critical here; debug-friendly `-od/-d2` can push the image past 64KiB
+# and crash on the first command execution.
+CFLAGS  := -s -ecc -1 -ms -zl -os -d0 -i$(INCDIR)
 ASFLAGS := -f obj
 # wlink는 보통 응답파일(link.lk)을 쓰지만, 여기선 그대로 사용
 LDFILE  := link.lk
@@ -24,7 +29,7 @@ LDFILE  := link.lk
 # ------------------------------
 # Sources
 # ------------------------------
-SRCS_C     := kernel.c sima_mem.c sima_conv.c sima_ide.c sima_fs.c sima_program.c sima_env.c commands.c
+SRCS_C     := kernel.c sima_mem.c sima_conv.c sima_ide.c sima_fs.c sima_program.c sima_env.c sima_user.c sima_perm.c commands.c
 SRCS_ASM   := dgroup_marker.asm bss_start.asm code_marker.asm api.asm kernel_entry.asm math_helpers.asm sima_heap.asm sima_ioport.asm code_end.asm bss_end.asm
 
 # ------------------------------
@@ -53,11 +58,17 @@ kernel.img: $(IMG)
 $(IMG): $(OBJS) | $(BINDIR)
 	@echo "[LD] $@"
 	$(LD) @$(LDFILE) NAME $@
+	@echo "[PACK] $@ (embed BSS for RAW output)"
+	@$(PY) tools/pack_kernel_image.py --img "$@" --map "$(BINDIR)/kernel.map"
 	@size=$$(stat -c%s "$@"); \
 	  pad=$$(( ((size + 511)/512)*512 )); \
 	  if [ $$pad -ne $$size ]; then \
 	    echo "[PAD] $$size -> $$pad bytes (512-align)"; \
 	    truncate -s $$pad "$@"; \
+	  fi; \
+	  if [ $$pad -gt 65536 ]; then \
+	    echo "[ERR] kernel.img too large: $$pad bytes (must be <= 65536 for 16-bit protected-mode layout)"; \
+	    exit 1; \
 	  fi
 
 # ------------------------------
@@ -77,14 +88,16 @@ $(OBJDIR)/%.obj: %.asm | $(OBJDIR)
 # Headers (간단 수동 의존성—필요시 추가)
 # ------------------------------
 # C 파일별 직접 의존(예: 타입/프로토타입 헤더)
-$(OBJDIR)/kernel.obj:        sima_io.h sima_type.h sima_mem.h sima_fs.h sima_env.h
+$(OBJDIR)/kernel.obj:        sima_io.h sima_type.h sima_mem.h sima_fs.h sima_env.h sima_user.h
 $(OBJDIR)/sima_mem.obj:      sima_type.h sima_mem.h
 $(OBJDIR)/sima_conv.obj:     sima_type.h sima_mem.h sima_conv.h
 $(OBJDIR)/sima_ide.obj:      sima_type.h sima_ide.h
 $(OBJDIR)/sima_fs.obj:       sima_type.h sima_mem.h sima_fs.h sima_ide.h
 $(OBJDIR)/sima_program.obj:  sima_type.h sima_program.h sima_fs.h sima_io.h
-$(OBJDIR)/commands.obj:      sima_type.h sima_mem.h sima_conv.h sima_fs.h sima_program.h sima_io.h sima_env.h
+$(OBJDIR)/commands.obj:      sima_type.h sima_mem.h sima_conv.h sima_fs.h sima_program.h sima_io.h sima_env.h sima_user.h sima_perm.h
 $(OBJDIR)/sima_env.obj:      sima_type.h sima_env.h sima_fs.h sima_mem.h
+$(OBJDIR)/sima_user.obj:     sima_type.h sima_user.h sima_fs.h sima_mem.h sima_env.h sima_conv.h
+$(OBJDIR)/sima_perm.obj:     sima_type.h sima_perm.h sima_user.h sima_fs.h sima_mem.h sima_env.h sima_conv.h
 
 # ------------------------------
 # Utility targets

@@ -10,8 +10,8 @@
 # QEMU/QMP artifacts
 *.sock
 *_vram.bin
+vram*.bin
 
 # Python bytecode
 __pycache__/
 *.pyc
-

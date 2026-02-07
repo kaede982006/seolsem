@@ -19,21 +19,22 @@ extern void  io_outb(UINT16 port, UINT8 value);
 extern void  io_insw(UINT16 port, void *buffer, UINT16 count);
 extern void  io_outsw(UINT16 port, const void *buffer, UINT16 count);
 
-static BOOL ide_wait(UINT8 mask, UINT8 value, UINT16 timeout) {
+static BOOL ide_wait(UINT8 mask, UINT8 value, UINT16 timeout, BOOL fail_on_err) {
     UINT16 i;
     for (i = 0; i < timeout; ++i) {
         UINT8 status = io_inb(IDE_STATUS);
+        if (fail_on_err && (status & IDE_STATUS_ERR)) return FALSE;
         if ((status & mask) == value) return TRUE;
     }
     return FALSE;
 }
 
 static BOOL ide_wait_ready(void) {
-    return ide_wait(IDE_STATUS_BSY | IDE_STATUS_DRQ, 0, 0xFFFF);
+    return ide_wait(IDE_STATUS_BSY | IDE_STATUS_DRQ, 0, 0xFFFF, TRUE);
 }
 
 static BOOL ide_wait_drq(void) {
-    return ide_wait(IDE_STATUS_BSY | IDE_STATUS_DRQ, IDE_STATUS_DRQ, 0xFFFF);
+    return ide_wait(IDE_STATUS_BSY | IDE_STATUS_DRQ, IDE_STATUS_DRQ, 0xFFFF, TRUE);
 }
 
 static void ide_select_drive(UINT32 lba) {
@@ -99,7 +100,7 @@ BOOL ide_identify_total_sectors(UINT32 *out_total_sectors) {
     status = io_inb(IDE_STATUS);
     if (status == 0) return FALSE;
 
-    if (!ide_wait(IDE_STATUS_BSY, 0, 0xFFFF)) return FALSE;
+    if (!ide_wait(IDE_STATUS_BSY, 0, 0xFFFF, TRUE)) return FALSE;
     if (io_inb(IDE_STATUS) & IDE_STATUS_ERR) return FALSE;
     if (!ide_wait_drq()) return FALSE;
 
