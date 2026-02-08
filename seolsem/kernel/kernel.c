@@ -64,18 +64,50 @@ static void build_prompt(char *out, UINT16 out_cap) {
     sima_strcat(out, out_cap, "]$ ");
 }
 
+static void show_shell_banner(void) {
+    clear_screen();
+    print_message("Seolsem OS Version 1.1");
+    print_message("Type HELP to see available commands.");
+    print_message("");
+}
+
+static void login_screen(void) {
+    for (;;) {
+        clear_screen();
+        print_message("Seolsem OS Version 1.1");
+        print_message("Login required.");
+        print_message("");
+        for (;;) {
+            sync_ds();
+            wait_prompt("login: ", buffer);
+            sync_ds();
+            if (buffer[0] == '\0') {
+                print_message("Login name required.");
+                continue;
+            }
+            wait_prompt("password: ", auth_pass);
+            sync_ds();
+            if (user_login(buffer, auth_pass)) {
+                (void)sima_memclr(buffer, (UINT16)sizeof(buffer));
+                (void)sima_memclr(auth_pass, (UINT16)sizeof(auth_pass));
+                show_shell_banner();
+                return;
+            }
+            print_message("Login incorrect.");
+            (void)sima_memclr(buffer, (UINT16)sizeof(buffer));
+            (void)sima_memclr(auth_pass, (UINT16)sizeof(auth_pass));
+        }
+    }
+}
+
 void kernel_main(void) {
     BOOL fs_ok;
     BOOL env_ok;
-    UINT16 login_tries = 0;
     /* Keep IRQs disabled during early init, then enable after IDT/PIC are ready. */
     disable_irq();
     sync_ds();
 
-    clear_screen();
-    print_message("Seolsem OS Version 1.0");
-    print_message("Type HELP to see available commands.");
-    print_message("");
+    show_shell_banner();
     if (!sima_memclr(current_path, (UINT16)sizeof(current_path))) {
         print_message("Unable to Initialize Local Path");
         for(;;) {}
@@ -88,34 +120,17 @@ void kernel_main(void) {
     if (!env_ok) {
         print_message("Environment init failed.");
     }
-    if (fs_ok) {
-        (void)user_init();
-        enable_irq();
-        if (user_count() > 1) {
-            for (login_tries = 0; login_tries < 3; ++login_tries) {
-                sync_ds();
-                wait_prompt("login: ", buffer);
-                sync_ds();
-                if (buffer[0] == '\0') {
-                    break; /* default ROOT */
-                }
-                wait_prompt("password: ", auth_pass);
-                sync_ds();
-                if (user_login(buffer, auth_pass)) {
-                    break;
-                }
-                print_message("Login incorrect.");
-                (void)sima_memclr(buffer, (UINT16)sizeof(buffer));
-                (void)sima_memclr(auth_pass, (UINT16)sizeof(auth_pass));
-            }
-            (void)sima_memclr(buffer, (UINT16)sizeof(buffer));
-            (void)sima_memclr(auth_pass, (UINT16)sizeof(auth_pass));
-        }
-    } else {
-        enable_irq();
+    if (!fs_ok) {
+        print_message("Login database fallback: in-memory ROOT only.");
     }
+    (void)user_init();
+    enable_irq();
+
     build_prompt(current_path, (UINT16)sizeof(current_path));
 	for (;;) {
+        if (!user_is_logged_in()) {
+            login_screen();
+        }
         sync_ds();
         build_prompt(current_path, (UINT16)sizeof(current_path));
 

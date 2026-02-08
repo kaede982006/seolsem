@@ -12,6 +12,13 @@ static SIMA_USER g_current;
 
 static UINT8 g_passwd_buf[512 + 1];
 
+static char user_to_upper(char ch) {
+    if (ch >= 'a' && ch <= 'z') {
+        return (char)(ch - 'a' + 'A');
+    }
+    return ch;
+}
+
 static BOOL user_is_name_char(char ch) {
     if (ch >= 'a' && ch <= 'z') return TRUE;
     if (ch >= 'A' && ch <= 'Z') return TRUE;
@@ -26,7 +33,7 @@ static BOOL user_copy_password(const char *in, char *out, UINT16 out_cap, BOOL a
     sima_memclr(out, out_cap);
     while (*in != '\0') {
         char ch = *in++;
-        if (ch < 32 || ch == ':' || ch == '\r' || ch == '\n') return FALSE;
+        if (ch < 32 || ch == 127 || ch == ':' || ch == '\r' || ch == '\n') return FALSE;
         if (len + 1 >= out_cap) return FALSE;
         out[len++] = ch;
     }
@@ -43,7 +50,7 @@ static BOOL user_normalize_name(const char *in, char *out, UINT16 out_cap) {
         char ch = *in++;
         if (!user_is_name_char(ch)) return FALSE;
         if (len + 1 >= out_cap) return FALSE;
-        out[len++] = ch;
+        out[len++] = user_to_upper(ch);
         if (len >= 8) break; /* FAT 8.3 base limit */
     }
     if (len == 0) return FALSE;
@@ -72,12 +79,21 @@ static BOOL ensure_dir(const char *path) {
 }
 
 static BOOL user_set_current(const SIMA_USER *u) {
+    char cwd[FS_PATH_MAX];
+
     if (!u || !u->used) return FALSE;
     sima_memcpy(&g_current, u, (UINT16)sizeof(SIMA_USER));
     env_set_public("USER", g_current.name);
     env_set_public("HOME", g_current.home);
-    /* Try to move to HOME (best-effort). */
-    (void)fs_cd(g_current.home);
+    if (!fs_cd(g_current.home)) {
+        (void)fs_cd("/");
+    }
+    sima_memclr(cwd, (UINT16)sizeof(cwd));
+    if (!fs_get_cwd(cwd, (UINT16)sizeof(cwd))) {
+        sima_strcpy(cwd, (UINT16)sizeof(cwd), "/");
+    }
+    env_set_public("PWD", cwd);
+    env_set_public("OLDPWD", cwd);
     return TRUE;
 }
 
@@ -191,7 +207,6 @@ static BOOL user_sync_passwd(void) {
 }
 
 BOOL user_init(void) {
-    const SIMA_USER *u;
     BOOL loaded;
 
     sima_memclr((char*)&g_current, (UINT16)sizeof(g_current));
@@ -210,8 +225,7 @@ BOOL user_init(void) {
         (void)user_sync_passwd();
     }
 
-    u = user_find("ROOT");
-    if (u) (void)user_set_current(u);
+    user_logout();
     return TRUE;
 }
 
@@ -263,6 +277,15 @@ BOOL user_login(const char *name, const char *password) {
     return user_set_current(u);
 }
 
+void user_logout(void) {
+    sima_memclr((char*)&g_current, (UINT16)sizeof(g_current));
+    env_set_public("USER", "");
+    env_set_public("HOME", "/");
+    env_set_public("PWD", "/");
+    env_set_public("OLDPWD", "/");
+    (void)fs_cd("/");
+}
+
 BOOL user_change_password(const char *old_password, const char *new_password) {
     const SIMA_USER *current = user_current();
     char old_norm[USER_PASS_MAX];
@@ -294,10 +317,12 @@ BOOL user_change_password(const char *old_password, const char *new_password) {
 }
 
 const SIMA_USER *user_current(void) {
-    if (!g_current.used) {
-        return user_find("ROOT");
-    }
+    if (!g_current.used) return (const SIMA_USER*)0;
     return &g_current;
+}
+
+BOOL user_is_logged_in(void) {
+    return g_current.used ? TRUE : FALSE;
 }
 
 UINT16 user_count(void) {

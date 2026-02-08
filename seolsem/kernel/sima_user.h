@@ -20,6 +20,8 @@ BOOL user_init(void);
 BOOL user_add(const char *name, const char *password);
 BOOL user_login(const char *name, const char *password);
 BOOL user_change_password(const char *old_password, const char *new_password);
+void user_logout(void);
+BOOL user_is_logged_in(void);
 
 const SIMA_USER *user_current(void);
 UINT16 user_count(void);

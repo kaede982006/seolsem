@@ -33,329 +33,42 @@ static void print_simple(const char *text);
 #define SCAN_HOME 0x47
 #define SCAN_END 0x4F
 #define SCAN_DEL 0x53
-#define SCAN_PGUP 0x49
-#define SCAN_PGDN 0x51
-#define SCAN_F1 0x3B
-#define SCAN_F10 0x44
 
-/* seolsem keyboard driver notes:
- * - Alt press (make) generates scan 0x38 (ascii 0). Break codes are ignored.
- * - Extended keys use E0 prefix; read_key() returns ascii 0 and scan in AH.
- */
-#define SCAN_ALT 0x38
-
-/* Legacy BIOS/INT16h scan codes for some Alt+extended keys.
- * seolsem/read_key() typically does NOT generate these, but keeping them
- * here doesn't hurt for future compatibility.
- */
-#define SCAN_ALT_LEFT 0x9B
-#define SCAN_ALT_RIGHT 0x9D
-#define SCAN_ALT_UP 0x98
-#define SCAN_ALT_DOWN 0xA0
-
-/* letter scan codes (set1); used for menu shortcuts in some environments */
-#define SCAN_KEY_F 0x21
-#define SCAN_KEY_E 0x12
-#define SCAN_KEY_H 0x23
-
-/* Color attributes (VGA text mode: background<<4 | foreground).
- * Use strong-contrast pairs and avoid foreground=0 for selected items.
- */
-#define EDIT_ATTR_TEXT            0x07  /* light gray on black */
-#define EDIT_ATTR_MENU_BAR_BG     0x1F  /* white on blue */
-#define EDIT_ATTR_MENU_BAR_TXT    0x1E  /* yellow on blue */
-#define EDIT_ATTR_MENU_BAR_SEL    0x71  /* blue on light gray */
-#define EDIT_ATTR_MENU_BORDER     0x1F  /* white on blue */
-#define EDIT_ATTR_MENU_ITEM       0x1E  /* yellow on blue */
-#define EDIT_ATTR_MENU_ITEM_SEL   0x71  /* blue on light gray */
-#define EDIT_ATTR_STATUS_BG       0x1F  /* white on blue */
-#define EDIT_ATTR_STATUS_TXT      0x1E  /* yellow on blue */
-
-static void editor_draw_row(UINT8 row, const char *text, UINT8 attr) {
+static void editor_draw_row(UINT8 row, const char *text) {
     UINT8 col;
     for (col = 0; col < EDIT_COLS; ++col) {
         char ch = ' ';
         if (text && text[col] != '\0') ch = text[col];
-        write_char(row, col, ch, attr);
+        write_char(row, col, ch, 0x07);
     }
 }
 
-
-typedef struct {
-    const char *label;
-    const char *shortcut;
-    UINT8 action;
-} EDIT_MENU_ITEM;
-
-enum {
-    EDIT_ACT_NONE = 0,
-    EDIT_ACT_SAVE = 1,
-    EDIT_ACT_EXIT = 2,
-    EDIT_ACT_QUIT = 3,
-    EDIT_ACT_HELP_KEYS = 4,
-    EDIT_ACT_HELP_ABOUT = 5
-};
-
-enum {
-    EDIT_MENU_FILE = 0,
-    EDIT_MENU_EDIT = 1,
-    EDIT_MENU_HELP = 2
-};
-
-static const EDIT_MENU_ITEM edit_menu_file[] = {
-    { "Save", "Ctrl+S", EDIT_ACT_SAVE },
-    { "Exit", "Esc",    EDIT_ACT_EXIT },
-    { "Quit", "Ctrl+Q", EDIT_ACT_QUIT }
-};
-
-static const EDIT_MENU_ITEM edit_menu_edit[] = {
-    { "Cut",   "", EDIT_ACT_NONE },
-    { "Copy",  "", EDIT_ACT_NONE },
-    { "Paste", "", EDIT_ACT_NONE }
-};
-
-static const EDIT_MENU_ITEM edit_menu_help[] = {
-    { "Keys",  "F1", EDIT_ACT_HELP_KEYS },
-    { "About", "",   EDIT_ACT_HELP_ABOUT }
-};
-
-static UINT8 editor_menu_count(UINT8 menu) {
-    if (menu == EDIT_MENU_FILE) return (UINT8)(sizeof(edit_menu_file) / sizeof(edit_menu_file[0]));
-    if (menu == EDIT_MENU_EDIT) return (UINT8)(sizeof(edit_menu_edit) / sizeof(edit_menu_edit[0]));
-    return (UINT8)(sizeof(edit_menu_help) / sizeof(edit_menu_help[0]));
+static void editor_draw_header(const char *name, BOOL modified) {
+    char line[EDIT_COLS + 1];
+    sima_memset(line, ' ', (UINT16)EDIT_COLS);
+    line[EDIT_COLS] = '\0';
+    sima_strcpy(line, (UINT16)sizeof(line), "EDIT - ");
+    sima_strcat(line, (UINT16)sizeof(line), name);
+    if (modified) {
+        sima_strcat(line, (UINT16)sizeof(line), " *");
+    }
+    editor_draw_row(EDIT_HEADER_ROW, line);
 }
-
-static const EDIT_MENU_ITEM* editor_menu_item(UINT8 menu, UINT8 idx) {
-    if (menu == EDIT_MENU_FILE) return &edit_menu_file[idx];
-    if (menu == EDIT_MENU_EDIT) return &edit_menu_edit[idx];
-    return &edit_menu_help[idx];
-}
-
-static void editor_fill(UINT8 row, UINT8 col, UINT8 width, char ch, UINT8 attr) {
-    UINT8 i;
-    for (i = 0; i < width && (UINT16)(col + i) < EDIT_COLS; ++i) {
-        write_char(row, (UINT8)(col + i), ch, attr);
-    }
-}
-
-static void editor_write_text(UINT8 row, UINT8 col, const char *text, UINT8 attr) {
-    UINT8 i = 0;
-    while (text && text[i] != '\0' && (UINT16)(col + i) < EDIT_COLS) {
-        write_char(row, (UINT8)(col + i), text[i], attr);
-        ++i;
-    }
-}
-
-static void editor_draw_menu_overlay(UINT8 menu_sel, UINT8 item_sel) {
-    /* DOS-like dropdown box under the menu bar (colored + bordered) */
-    UINT8 i;
-    UINT8 count = editor_menu_count(menu_sel);
-    UINT8 box_top = (UINT8)(EDIT_HEADER_ROW + 1);
-    UINT8 box_left = 1;
-    UINT8 max_label = 0;
-    UINT8 max_short = 0;
-    UINT8 inner_w;
-    UINT8 box_w;
-    UINT8 box_h;
-
-    if (menu_sel == EDIT_MENU_EDIT) box_left = 8;
-    if (menu_sel == EDIT_MENU_HELP) box_left = 15;
-
-    /* compute a reasonable width so text doesn't overlap */
-    for (i = 0; i < count; ++i) {
-        const EDIT_MENU_ITEM *it = editor_menu_item(menu_sel, i);
-        UINT8 ll = (UINT8)sima_strlen(it->label);
-        if (ll > max_label) max_label = ll;
-        if (it->shortcut && it->shortcut[0] != '\0') {
-            UINT8 sl = (UINT8)sima_strlen(it->shortcut);
-            if (sl > max_short) max_short = sl;
-        }
-    }
-
-    /* inside the border: [marker+space] + label + [2 spaces + shortcut] */
-    inner_w = (UINT8)(2 + max_label);
-    if (max_short > 0) inner_w = (UINT8)(inner_w + 2 + max_short);
-    if (inner_w < 18) inner_w = 18;
-    if (inner_w > 50) inner_w = 50;
-
-    box_w = (UINT8)(inner_w + 2); /* border left/right */
-    box_h = (UINT8)(count + 2);   /* border top/bottom */
-
-    /* keep box fully on screen */
-    if ((UINT16)(box_left + box_w) > EDIT_COLS) {
-        if (box_w < EDIT_COLS) box_left = (UINT8)(EDIT_COLS - box_w);
-        else box_left = 0;
-    }
-    if ((UINT16)(box_top + box_h) > EDIT_STATUS_ROW) {
-        if (box_h < EDIT_STATUS_ROW) box_top = (UINT8)(EDIT_STATUS_ROW - box_h);
-    }
-
-    /* fill background */
-    for (i = 0; i < box_h; ++i) {
-        editor_fill((UINT8)(box_top + i), box_left, box_w, ' ', EDIT_ATTR_MENU_ITEM);
-    }
-
-    /* border */
-    {
-        UINT8 c;
-        UINT8 r;
-        for (c = 0; c < box_w; ++c) {
-            write_char(box_top, (UINT8)(box_left + c), '-', EDIT_ATTR_MENU_BORDER);
-            write_char((UINT8)(box_top + box_h - 1), (UINT8)(box_left + c), '-', EDIT_ATTR_MENU_BORDER);
-        }
-        for (r = 0; r < box_h; ++r) {
-            write_char((UINT8)(box_top + r), box_left, '|', EDIT_ATTR_MENU_BORDER);
-            write_char((UINT8)(box_top + r), (UINT8)(box_left + box_w - 1), '|', EDIT_ATTR_MENU_BORDER);
-        }
-        write_char(box_top, box_left, '+', EDIT_ATTR_MENU_BORDER);
-        write_char(box_top, (UINT8)(box_left + box_w - 1), '+', EDIT_ATTR_MENU_BORDER);
-        write_char((UINT8)(box_top + box_h - 1), box_left, '+', EDIT_ATTR_MENU_BORDER);
-        write_char((UINT8)(box_top + box_h - 1), (UINT8)(box_left + box_w - 1), '+', EDIT_ATTR_MENU_BORDER);
-    }
-
-    /* items */
-    for (i = 0; i < count; ++i) {
-        const EDIT_MENU_ITEM *it = editor_menu_item(menu_sel, i);
-        UINT8 r = (UINT8)(box_top + 1 + i);
-        UINT8 attr = (i == item_sel) ? EDIT_ATTR_MENU_ITEM_SEL : EDIT_ATTR_MENU_ITEM;
-        UINT8 inner_left = (UINT8)(box_left + 1);
-        UINT8 inner_right = (UINT8)(box_left + box_w - 2);
-
-        /* fill row background */
-        editor_fill(r, inner_left, (UINT8)(box_w - 2), ' ', attr);
-
-        /* selector marker */
-        write_char(r, inner_left, (i == item_sel) ? '>' : ' ', attr);
-
-        /* label */
-        editor_write_text(r, (UINT8)(inner_left + 2), it->label, attr);
-
-        /* shortcut aligned to the right */
-        if (it->shortcut && it->shortcut[0] != '\0') {
-            UINT8 slen = (UINT8)sima_strlen(it->shortcut);
-            UINT8 sc = inner_left;
-            if (slen <= (UINT8)(inner_right - inner_left)) {
-                sc = (UINT8)(inner_right - slen + 1);
-                if (sc < (UINT8)(inner_left + 2)) sc = (UINT8)(inner_left + 2);
-            }
-            editor_write_text(r, sc, it->shortcut, attr);
-        }
-    }
-}
-
-static void editor_popup_message(const char *l1, const char *l2, const char *l3, const char *l4) {
-    /* centered popup; any NULL line is skipped */
-    const char *lines[4];
-    UINT8 i;
-    UINT8 count = 0;
-    UINT8 box_w = 60;
-    UINT8 box_h;
-    UINT8 top = 6;
-    UINT8 left = 10;
-
-    lines[0] = l1;
-    lines[1] = l2;
-    lines[2] = l3;
-    lines[3] = l4;
-
-    for (i = 0; i < 4; ++i) {
-        if (lines[i] && lines[i][0] != '\0') ++count;
-    }
-    if (count == 0) return;
-
-    box_h = (UINT8)(count + 2);
-
-    for (i = 0; i < box_h; ++i) {
-        editor_fill((UINT8)(top + i), left, box_w, ' ', EDIT_ATTR_MENU_ITEM);
-    }
-
-    /* border (ASCII) */
-    for (i = 0; i < box_w; ++i) {
-        write_char(top, (UINT8)(left + i), '-', EDIT_ATTR_MENU_BORDER);
-        write_char((UINT8)(top + box_h - 1), (UINT8)(left + i), '-', EDIT_ATTR_MENU_BORDER);
-    }
-    write_char(top, left, '+', EDIT_ATTR_MENU_BORDER);
-    write_char(top, (UINT8)(left + box_w - 1), '+', EDIT_ATTR_MENU_BORDER);
-    write_char((UINT8)(top + box_h - 1), left, '+', EDIT_ATTR_MENU_BORDER);
-    write_char((UINT8)(top + box_h - 1), (UINT8)(left + box_w - 1), '+', EDIT_ATTR_MENU_BORDER);
-
-    /* text */
-    {
-        UINT8 row = (UINT8)(top + 1);
-        for (i = 0; i < 4; ++i) {
-            if (lines[i] && lines[i][0] != '\0') {
-                editor_write_text(row, (UINT8)(left + 2), lines[i], EDIT_ATTR_MENU_BAR_TXT);
-                ++row;
-            }
-        }
-    }
-
-    /* wait any key */
-    read_key();
-}
-
-
-static void editor_draw_header(const char *name, BOOL modified, BOOL menu_open, UINT8 menu_sel) {
-    /* DOS-like menu bar (colored) */
-    UINT16 i;
-    char right[EDIT_COLS + 1];
-    UINT16 len;
-    UINT16 start;
-
-    /* fill header row */
-    for (i = 0; i < EDIT_COLS; ++i) {
-        write_char(EDIT_HEADER_ROW, (UINT8)i, ' ', EDIT_ATTR_MENU_BAR_BG);
-    }
-
-    /* menu labels: padded fields so the highlight background is visible */
-    editor_write_text(EDIT_HEADER_ROW, 1,  " File ", (menu_open && menu_sel == EDIT_MENU_FILE) ? EDIT_ATTR_MENU_BAR_SEL : EDIT_ATTR_MENU_BAR_TXT);
-    editor_write_text(EDIT_HEADER_ROW, 8,  " Edit ", (menu_open && menu_sel == EDIT_MENU_EDIT) ? EDIT_ATTR_MENU_BAR_SEL : EDIT_ATTR_MENU_BAR_TXT);
-    editor_write_text(EDIT_HEADER_ROW, 15, " Help ", (menu_open && menu_sel == EDIT_MENU_HELP) ? EDIT_ATTR_MENU_BAR_SEL : EDIT_ATTR_MENU_BAR_TXT);
-
-    /* right side: filename and modified marker */
-    sima_memset(right, ' ', (UINT16)EDIT_COLS);
-    right[EDIT_COLS] = '\0';
-    sima_strcpy(right, (UINT16)sizeof(right), "EDIT: ");
-    sima_strcat(right, (UINT16)sizeof(right), name);
-    if (modified) sima_strcat(right, (UINT16)sizeof(right), " *");
-
-    len = sima_strlen(right);
-    start = 0;
-    if (len < EDIT_COLS) start = (UINT16)(EDIT_COLS - len);
-
-    for (i = 0; i < len && (start + i) < EDIT_COLS; ++i) {
-        write_char(EDIT_HEADER_ROW, (UINT8)(start + i), right[i], EDIT_ATTR_MENU_BAR_TXT);
-    }
-}
-
 
 static void editor_draw_status(const char *status) {
     char line[EDIT_COLS + 1];
-    UINT16 i;
-
-    /* fill status row background */
-    for (i = 0; i < EDIT_COLS; ++i) {
-        line[i] = ' ';
-    }
+    sima_memset(line, ' ', (UINT16)EDIT_COLS);
     line[EDIT_COLS] = '\0';
-
     if (status) {
         sima_strcpy(line, (UINT16)sizeof(line), status);
     }
-
-    /* write full row so background color is consistent */
-    editor_draw_row(EDIT_STATUS_ROW, line, EDIT_ATTR_STATUS_BG);
-
-    /* re-draw the text on top (same row, different attr) */
-    if (status) {
-        editor_write_text(EDIT_STATUS_ROW, 0, status, EDIT_ATTR_STATUS_TXT);
-    }
+    editor_draw_row(EDIT_STATUS_ROW, line);
 }
 
 static void editor_clear_content(void) {
     UINT8 row;
     for (row = 0; row < EDIT_ROWS; ++row) {
-        editor_draw_row((UINT8)(EDIT_CONTENT_ROW + row), NULL, EDIT_ATTR_TEXT);
+        editor_draw_row((UINT8)(EDIT_CONTENT_ROW + row), NULL);
     }
 }
 
@@ -407,8 +120,7 @@ static UINT16 editor_index_for_row_col(const char *buffer, UINT16 size, UINT16 t
 }
 
 static void editor_render(const char *name, const char *buffer, UINT16 size, UINT16 cursor,
-                          UINT16 *scroll_row, BOOL modified, const char *status,
-                          BOOL menu_open, UINT8 menu_sel, UINT8 menu_item_sel) {
+                          UINT16 *scroll_row, BOOL modified, const char *status) {
     UINT16 row;
     UINT16 col;
     UINT16 doc_row;
@@ -423,7 +135,7 @@ static void editor_render(const char *name, const char *buffer, UINT16 size, UIN
         *scroll_row = (UINT16)(doc_row - EDIT_ROWS + 1);
     }
 
-    editor_draw_header(name, modified, menu_open, menu_sel);
+    editor_draw_header(name, modified);
     editor_draw_status(status);
     editor_clear_content();
 
@@ -438,20 +150,13 @@ static void editor_render(const char *name, const char *buffer, UINT16 size, UIN
         }
         if (row >= *scroll_row && row < (UINT16)(*scroll_row + EDIT_ROWS)) {
             UINT8 screen_row = (UINT8)(EDIT_CONTENT_ROW + (row - *scroll_row));
-            write_char(screen_row, (UINT8)col, ch, EDIT_ATTR_TEXT);
+            write_char(screen_row, (UINT8)col, ch, 0x07);
         }
         col++;
         if (col >= EDIT_COLS) {
             row++;
             col = 0;
         }
-    }
-
-    if (menu_open) {
-        editor_draw_menu_overlay(menu_sel, menu_item_sel);
-        /* keep cursor out of the dropdown area */
-        set_cursor(EDIT_STATUS_ROW, 0);
-        return;
     }
 
     editor_index_to_pos(buffer, size, render_cursor, &doc_row, &doc_col);
@@ -462,7 +167,6 @@ static void editor_render(const char *name, const char *buffer, UINT16 size, UIN
         set_cursor(EDIT_CONTENT_ROW, 0);
     }
 }
-
 
 static BOOL editor_insert_char(char *buffer, UINT16 *size, UINT16 *cursor, char ch) {
     if (*size >= EDIT_MAX_SIZE) return FALSE;
@@ -1085,9 +789,6 @@ static BOOL run_edit(const char *name) {
         UINT16 scroll_row = 0;
         UINT16 desired_col = 0;
         BOOL modified = FALSE;
-        BOOL menu_open = FALSE;
-        UINT8 menu_sel = EDIT_MENU_FILE;
-        UINT8 menu_item_sel = 0;
         char status[EDIT_COLS + 1];
         UINT32 read_size = 0;
 
@@ -1098,155 +799,19 @@ static BOOL run_edit(const char *name) {
         }
 
         clear_screen();
+        sima_strcpy(status, (UINT16)sizeof(status),
+                    "Ctrl+S Save  Esc Save&Exit  Ctrl+Q Quit  Arrows Move");
 
         for (;;) {
             UINT16 key;
             UINT8 ascii;
             UINT8 scan;
 
-            if (menu_open) {
-                sima_strcpy(status, (UINT16)sizeof(status), "Arrows Move  Enter Select  Esc Cancel  F10 Menu");
-            } else {
-                sima_strcpy(status, (UINT16)sizeof(status), "F1 Help  Ctrl+S Save  F10 Menu  Esc Save&Exit  Ctrl+Q Quit");
-            }
-
-            editor_render(name, buffer, size, cursor, &scroll_row, modified, status, menu_open, menu_sel, menu_item_sel);
-
+            editor_render(name, buffer, size, cursor, &scroll_row, modified, status);
             key = read_key();
             ascii = (UINT8)(key & 0xFF);
-            scan  = (UINT8)((key >> 8) & 0xFF);
+            scan = (UINT8)((key >> 8) & 0xFF);
 
-            /* Global help */
-            if ((ascii == 0 || ascii == 0xE0) && scan == SCAN_F1) {
-                editor_popup_message(
-                    "Keys:",
-                    "  Arrows/Home/End/PgUp/PgDn  Move   Del/Backspace  Delete",
-                    "  Ctrl+S Save   Esc Save&Exit   Ctrl+Q Quit   F10 Menu",
-                    "  Menu: Arrows + Enter, Esc cancel"
-                );
-                continue;
-            }
-
-            /* Menu handling */
-            if (menu_open) {
-                UINT8 count = editor_menu_count(menu_sel);
-
-                if (ascii == KEY_ESC) {
-                    menu_open = FALSE;
-                    continue;
-                }
-
-                if ((ascii == 0 || ascii == 0xE0) && scan == SCAN_F10) {
-                    menu_open = FALSE;
-                    continue;
-                }
-
-                if (ascii == 0 && scan == SCAN_ALT) {
-                    menu_open = FALSE;
-                    continue;
-                }
-
-                if (ascii == KEY_ENTER) {
-                    const EDIT_MENU_ITEM *it = editor_menu_item(menu_sel, menu_item_sel);
-
-                    if (it->action == EDIT_ACT_SAVE) {
-                        if (!fs_write(name, (const UINT8*)buffer, (UINT32)size)) {
-                            sima_strcpy(status, (UINT16)sizeof(status), "Save failed.");
-                        } else {
-                            sima_strcpy(status, (UINT16)sizeof(status), "Saved.");
-                            modified = FALSE;
-                        }
-                    } else if (it->action == EDIT_ACT_EXIT) {
-                        if (!fs_write(name, (const UINT8*)buffer, (UINT32)size)) {
-                            sima_strcpy(status, (UINT16)sizeof(status), "Unable to save.");
-                        } else {
-                            clear_screen();
-                            print_simple("Memo saved.");
-                            break;
-                        }
-                    } else if (it->action == EDIT_ACT_QUIT) {
-                        clear_screen();
-                        print_simple("Edit cancelled.");
-                        break;
-                    } else if (it->action == EDIT_ACT_HELP_KEYS) {
-                        editor_popup_message(
-                            "EDIT Help:",
-                            "  File->Save  (Ctrl+S)",
-                            "  File->Exit  (Esc: Save&Exit)",
-                            "  File->Quit  (Ctrl+Q)"
-                        );
-                    } else if (it->action == EDIT_ACT_HELP_ABOUT) {
-                        editor_popup_message(
-                            "EDIT (DOS-style UI)",
-                            "  Menu-driven editor inspired by MS-DOS EDIT.",
-                            "  This is a lightweight implementation for seolsem.",
-                            ""
-                        );
-                    } else {
-                        sima_strcpy(status, (UINT16)sizeof(status), "Not implemented.");
-                    }
-
-                    menu_open = FALSE;
-                    continue;
-                }
-
-                if (ascii == 0 || ascii == 0xE0) {
-                    /* Menu bar left/right: clamp at ends (no wrap) */
-                    if (scan == SCAN_LEFT) {
-                        if (menu_sel > 0) menu_sel--;
-                        menu_item_sel = 0;
-                        continue;
-                    }
-                    if (scan == SCAN_RIGHT) {
-                        if (menu_sel < 2) menu_sel++;
-                        menu_item_sel = 0;
-                        continue;
-                    }
-
-                    /* Dropdown up/down: clamp at ends (no wrap) */
-                    if (scan == SCAN_UP) {
-                        if (menu_item_sel > 0) menu_item_sel--;
-                        continue;
-                    }
-                    if (scan == SCAN_DOWN) {
-                        if (menu_item_sel + 1 < count) menu_item_sel++;
-                        continue;
-                    }
-                    if (scan == SCAN_HOME) {
-                        menu_item_sel = 0;
-                        continue;
-                    }
-                    if (scan == SCAN_END) {
-                        menu_item_sel = (UINT8)(count - 1);
-                        continue;
-                    }
-                }
-
-                /* Letter shortcuts while menu is open */
-                if (ascii == 'f' || ascii == 'F') { menu_sel = EDIT_MENU_FILE; menu_item_sel = 0; continue; }
-                if (ascii == 'e' || ascii == 'E') { menu_sel = EDIT_MENU_EDIT; menu_item_sel = 0; continue; }
-                if (ascii == 'h' || ascii == 'H') { menu_sel = EDIT_MENU_HELP; menu_item_sel = 0; continue; }
-
-                continue;
-            }
-
-            /* Open menu triggers (when not open) */
-            if ((ascii == 0 || ascii == 0xE0) && scan == SCAN_F10) {
-                menu_open = TRUE;
-                menu_sel = EDIT_MENU_FILE;
-                menu_item_sel = 0;
-                continue;
-            }
-
-            /* Alt (sticky) toggles the menu in seolsem (Alt release isn't reported) */
-            if (ascii == 0 && scan == SCAN_ALT) {
-                menu_open = TRUE;
-                menu_sel = EDIT_MENU_FILE;
-                menu_item_sel = 0;
-                continue;
-            }
-
-            /* Standard edit keys */
             if (ascii == KEY_ESC) {
                 if (!fs_write(name, (const UINT8*)buffer, (UINT32)size)) {
                     print_simple("Unable to save memo.");
@@ -1290,9 +855,6 @@ static BOOL run_edit(const char *name) {
             if (ascii == 0 || ascii == 0xE0) {
                 UINT16 row;
                 UINT16 col;
-                UINT16 last_row;
-                UINT16 last_col;
-
                 editor_index_to_pos(buffer, size, cursor, &row, &col);
                 desired_col = col;
 
@@ -1328,25 +890,6 @@ static BOOL run_edit(const char *name) {
                     }
                     continue;
                 }
-
-                /* Page up / down: scroll by one page and keep column */
-                if (scan == SCAN_PGUP) {
-                    if (scroll_row >= EDIT_ROWS) scroll_row = (UINT16)(scroll_row - EDIT_ROWS);
-                    else scroll_row = 0;
-                    cursor = editor_index_for_row_col(buffer, size, scroll_row, desired_col);
-                    continue;
-                }
-                if (scan == SCAN_PGDN) {
-                    editor_index_to_pos(buffer, size, size, &last_row, &last_col);
-                    if ((UINT16)(scroll_row + EDIT_ROWS) < last_row) {
-                        scroll_row = (UINT16)(scroll_row + EDIT_ROWS);
-                    } else {
-                        if (last_row > EDIT_ROWS) scroll_row = (UINT16)(last_row - EDIT_ROWS + 1);
-                        else scroll_row = 0;
-                    }
-                    cursor = editor_index_for_row_col(buffer, size, scroll_row, desired_col);
-                    continue;
-                }
             }
 
             if (ascii >= 32 && ascii != 127) {
@@ -1359,7 +902,6 @@ static BOOL run_edit(const char *name) {
     }
     return TRUE;
 }
-
 
 static BOOL run_rm(const char *name) {
     if (!name) return FALSE;

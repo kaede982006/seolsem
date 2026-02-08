@@ -119,10 +119,8 @@ ui_init:
     push cx
     mov ax, 0x0003
     int 0x10
-    ; Enable blinking text-mode cursor (BIOS).
-    mov ah, 0x01
-    mov cx, 0x0607
-    int 0x10
+    ; Hide cursor by default; it is shown only during text input.
+    call ui_hide_cursor
     pop cx
     pop ax
     mov bl, UI_ATTR_BG
@@ -679,6 +677,33 @@ ui_set_cursor:
     int 0x10
     pop dx
     pop bx
+    pop ax
+    ret
+
+; ------------------------------------------------------------
+; ui_hide_cursor: make hardware cursor invisible
+; ------------------------------------------------------------
+ui_hide_cursor:
+    push ax
+    push cx
+    mov ah, 0x01
+    mov ch, 0x20           ; bit 5 set = cursor off
+    xor cl, cl
+    int 0x10
+    pop cx
+    pop ax
+    ret
+
+; ------------------------------------------------------------
+; ui_show_cursor: make hardware cursor visible (scanlines 6-7)
+; ------------------------------------------------------------
+ui_show_cursor:
+    push ax
+    push cx
+    mov ah, 0x01
+    mov cx, 0x0607
+    int 0x10
+    pop cx
     pop ax
     ret
 

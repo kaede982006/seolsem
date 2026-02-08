@@ -19,12 +19,18 @@ segment _TEXT class=CODE use16
 %define PM_VIDEO_SEL 0x18
 
 ; VGA text-mode cursor control (CRTC)
-%define VGA_CRTC_INDEX 0x3D4
-%define VGA_CRTC_DATA  0x3D5
+%define VGA_CRTC_INDEX_C 0x3D4
+%define VGA_CRTC_DATA_C  0x3D5
+%define VGA_CRTC_INDEX_M 0x3B4
+%define VGA_CRTC_DATA_M  0x3B5
 %define VGA_CURSOR_LOW 0x0F
 %define VGA_CURSOR_HIGH 0x0E
 %define VGA_CURSOR_START 0x0A
 %define VGA_CURSOR_END   0x0B
+
+; VGA Miscellaneous Output Register (read)
+; Bit 0 selects CRTC I/O base: 1 => color (0x3D4/0x3D5), 0 => mono (0x3B4/0x3B5)
+%define VGA_MISC_READ 0x3CC
 
 ; i8042 keyboard controller
 %define KBD_STATUS 0x64
@@ -437,10 +443,10 @@ _wait_prompt:
     mov  [_input_start_col], al
 
     mov  si, [bp+6]         ; buf
-    mov  cx, si             ; buf start
     mov  byte [ss:si], 0
 
 .update_cursor:
+    call .sync_input_pos
     mov  dh, [_input_row]
     mov  dl, [_input_col]
     call set_cursor_hw
@@ -461,10 +467,12 @@ _wait_prompt:
     ; enforce input max (INPUT_MAX - 1)
     push ax
     mov  ax, si
-    sub  ax, cx
+    sub  ax, [bp+6]
     cmp  ax, (INPUT_MAX - 1)
     pop  ax
     jae  .poll
+
+    call .sync_input_pos
 
     ; avoid writing beyond bottom-right cell
     mov  bl, [_input_row]
@@ -484,38 +492,18 @@ _wait_prompt:
     jmp  .update_cursor
 
 .backspace:
-    cmp  si, cx
+    cmp  si, [bp+6]
     jbe  .poll
-    mov  al, [_input_row]
-    cmp  al, [_input_start_row]
-    jne  .backspace_move
-    mov  al, [_input_col]
-    cmp  al, [_input_start_col]
-    jbe  .poll
-
-.backspace_move:
-    mov  al, [_input_col]
-    cmp  al, 0
-    jne  .backspace_same_row
-    mov  al, [_input_row]
-    cmp  al, 0
-    je   .poll
-    dec  byte [_input_row]
-    mov  byte [_input_col], 79
-    jmp  .backspace_erase
-
-.backspace_same_row:
-    dec  byte [_input_col]
-
-.backspace_erase:
+    dec  si
+    mov  byte [ss:si], 0
+    call .sync_input_pos
     call .calc_di
     mov  byte [es:di], 0x20
     mov  byte [es:di+1], 0x07
-    dec  si
-    mov  byte [ss:si], 0
     jmp  .update_cursor
 
 .end_line:
+    call .sync_input_pos
     mov  al, [_input_row]
     inc  al
     cmp  al, 25
@@ -570,6 +558,47 @@ _wait_prompt:
 
 .advance_done:
     pop  di
+    pop  ax
+    ret
+
+.sync_input_pos:
+    push ax
+    push bx
+    push cx
+
+    mov  ax, si
+    sub  ax, [bp+6]
+    mov  bl, [_input_start_row]
+    mov  cl, [_input_start_col]
+
+.sync_loop:
+    cmp  ax, 0
+    je   .sync_done
+    cmp  cl, 79
+    jb   .sync_col_inc
+    cmp  bl, 24
+    jae  .sync_clamp
+    mov  cl, 0
+    inc  bl
+    dec  ax
+    jmp  .sync_loop
+
+.sync_col_inc:
+    inc  cl
+    dec  ax
+    jmp  .sync_loop
+
+.sync_clamp:
+    mov  bl, 24
+    mov  cl, 79
+    xor  ax, ax
+    jmp  .sync_done
+
+.sync_done:
+    mov  [_input_row], bl
+    mov  [_input_col], cl
+    pop  cx
+    pop  bx
     pop  ax
     ret
 
@@ -691,56 +720,160 @@ _print_message:
 
 ; DH=row, DL=col
 set_cursor_hw:
-    push ax
-    push bx
-    push dx
+    ; OSDev-compatible cursor movement:
+    ; pos = row * 80 + col
+    ; outb(CRTC_INDEX, 0x0F); outb(CRTC_DATA, pos & 0xFF);
+    ; outb(CRTC_INDEX, 0x0E); outb(CRTC_DATA, (pos >> 8) & 0xFF);
+    pusha
 
     xor  ax, ax
     mov  al, dh
-    mov  bx, 80
-    mul  bx                 ; AX = row*80
+    mov  bl, 80
+    mul  bl                ; AX = row * 80
     xor  bx, bx
     mov  bl, dl
-    add  ax, bx             ; AX = pos
-    mov  bx, ax             ; BX = pos
+    add  bx, ax            ; BX = pos (offset)
 
-    mov  dx, VGA_CRTC_INDEX
+    call get_crtc_base      ; DX = CRTC index port base
+
     mov  al, VGA_CURSOR_LOW
     out  dx, al
-    mov  dx, VGA_CRTC_DATA
+    inc  dx
     mov  al, bl
     out  dx, al
 
-    mov  dx, VGA_CRTC_INDEX
+    dec  dx
     mov  al, VGA_CURSOR_HIGH
     out  dx, al
-    mov  dx, VGA_CRTC_DATA
+    inc  dx
     mov  al, bh
     out  dx, al
 
+    popa
+    ret
+
+; Returns DX = CRTC index port base (0x3D4 color, 0x3B4 mono)
+get_crtc_base:
+    ; Read VGA Misc Output Register (0x3CC) to select the active CRTC base.
+    ; Note: immediate-port form of IN only supports 8-bit ports, so we must use DX.
+    push ax
+    push dx
+
+    mov  dx, VGA_MISC_READ
+    in   al, dx
+
     pop  dx
+    mov  dx, VGA_CRTC_INDEX_C
+    test al, 0x01
+    jnz  .done
+    mov  dx, VGA_CRTC_INDEX_M
+.done:
+    pop  ax
+    ret
+
+hide_cursor_hw:
+    ; OSDev-compatible cursor disable:
+    ; outb(CRTC_INDEX, 0x0A); outb(CRTC_DATA, 0x20);
+    pusha
+    call get_crtc_base
+    mov  al, VGA_CURSOR_START
+    out  dx, al
+    inc  dx
+    mov  al, 0x20
+    out  dx, al
+    popa
+    ret
+
+; ------------------------------------------------------------
+; Software cursor (attribute highlight) for environments where
+; VGA hardware cursor updates are unreliable.
+; Uses ES=PM_VIDEO_SEL (0xB800 text memory) as set by callers.
+; ------------------------------------------------------------
+soft_cursor_calc_di:
+    push ax
+    push bx
+    xor  ax, ax
+    mov  al, dh
+    mov  bx, 160
+    mul  bx
+    mov  di, ax
+    xor  ax, ax
+    mov  al, dl
+    shl  ax, 1
+    add  di, ax
     pop  bx
     pop  ax
     ret
 
-show_cursor_hw:
+soft_cursor_erase:
+    pusha
+    cmp  byte [_soft_cur_active], 0
+    je   .done
+    mov  dh, [_soft_cur_row]
+    mov  dl, [_soft_cur_col]
+    call soft_cursor_calc_di
+    mov  al, [_soft_cur_ch]
+    mov  [es:di], al
+    mov  al, [_soft_cur_attr]
+    mov  [es:di+1], al
+    mov  byte [_soft_cur_active], 0
+.done:
+    popa
+    ret
+
+soft_cursor_draw:
+    pusha
+    call soft_cursor_calc_di
+    mov  al, [es:di]
+    mov  [_soft_cur_ch], al
+    mov  al, [es:di+1]
+    mov  [_soft_cur_attr], al
+    mov  byte [es:di+1], 0x70     ; black on gray background
+    mov  [_soft_cur_row], dh
+    mov  [_soft_cur_col], dl
+    mov  byte [_soft_cur_active], 1
+    popa
+    ret
+
+; DH=row, DL=col
+soft_cursor_move:
+    pusha
     push dx
-    push ax
-    mov  dx, VGA_CRTC_INDEX
+    call soft_cursor_erase
+    pop  dx
+    call soft_cursor_draw
+    popa
+    ret
+
+show_cursor_hw:
+    ; OSDev-compatible cursor enable with preserved reserved bits:
+    ; outb(CRTC_INDEX, 0x0A);
+    ; outb(CRTC_DATA, (inb(CRTC_DATA) & 0xC0) | cursor_start);
+    ; outb(CRTC_INDEX, 0x0B);
+    ; outb(CRTC_DATA, (inb(CRTC_DATA) & 0xE0) | cursor_end);
+    pusha
+    call get_crtc_base
+
+    ; Cursor start scanline = 14 (underline), preserve bits 6-7
     mov  al, VGA_CURSOR_START
     out  dx, al
-    mov  dx, VGA_CRTC_DATA
-    mov  al, 0x0E
+    inc  dx
+    in   al, dx
+    and  al, 0xC0
+    or   al, 0x0E
     out  dx, al
 
-    mov  dx, VGA_CRTC_INDEX
+    ; Cursor end scanline = 15, preserve bits 5-7
+    dec  dx
     mov  al, VGA_CURSOR_END
     out  dx, al
-    mov  dx, VGA_CRTC_DATA
-    mov  al, 0x0F
+    inc  dx
+    in   al, dx
+    and  al, 0xE0
+    or   al, 0x0F
     out  dx, al
-    pop  ax
-    pop  dx
+
+    popa
     ret
 
 scroll_screen:
@@ -790,6 +923,12 @@ _input_col  db 0
 _input_row  db 0
 _input_start_col db 0
 _input_start_row db 0
+    ; software cursor state
+    _soft_cur_active db 0
+    _soft_cur_row    db 0
+    _soft_cur_col    db 0
+    _soft_cur_ch     db 0
+    _soft_cur_attr   db 0
 _kbd_q_head db 0
 _kbd_q_tail db 0
 _kbd_q_overflow db 0

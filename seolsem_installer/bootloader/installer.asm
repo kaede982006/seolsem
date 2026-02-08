@@ -116,13 +116,20 @@ start:
     ; One-floppy setup: try up to 4 additional attempts on A: (total tries = 5).
     mov byte [src_retry_left], 4
 .retry_src:
-    ; Only show retry message if this is not the first attempt
+    ; Only show retry/swap log messages after the first attempt.
     cmp byte [src_retry_left], 4
     je  .skip_retry_msg
     mov si, ui_log_src_retry
     call ui_log_push
+    mov si, ui_log_swap
+    call ui_log_push
 .skip_retry_msg:
-    call ui_swap_prompt
+    ; Status bar always shows swap hint; log only on retries (above).
+    mov si, ui_status_swap
+    call ui_status
+    xor al, al
+    call ui_progress
+    call read_key
 
     mov byte [src_drive], INSTALL_DRIVE
     ; Reset A: after swap
@@ -414,9 +421,8 @@ halt_forever:
     call ui_status
     mov al, 100
     call ui_progress
-    xor ax, ax
-    int 0x16        ; Wait for key
-    int 0x19        ; Warm boot (DL should be drive? 19h usually reloads form boot drive)
+    call read_key   ; Poll with marquee animation
+    int 0x19        ; Warm boot
     jmp $
 
 
@@ -447,15 +453,8 @@ init_serial:
 
 print_char:
     push bx
-    push ds
     push dx
-    push ax
-    mov ah, 0x0E
-    mov bh, 0x00
-    mov bl, 0x07
-    int 0x10
-    pop ax
-
+    ; Serial-only output (no INT 10h teletype to avoid cursor/VRAM corruption).
     mov bl, al
     mov dx, 0x3F8 + 5 ; LSR
 .wait_tx:
@@ -467,7 +466,6 @@ print_char:
     out dx, al
 
     pop dx
-    pop ds
     pop bx
     ret
 
@@ -494,8 +492,39 @@ print_crlf:
     ret
 
 read_key:
+    push cx
+    push dx
+    push ds
+    push es
+    push cs
+    pop ds
+    mov ax, 0x0040
+    mov es, ax
+.poll:
+    mov ah, 0x01
+    int 0x16               ; Check if key available (non-blocking)
+    jnz .got_key
+    call ui_status_tick    ; Animate marquee while waiting
+    ; Wait for 3 BIOS ticks (~165 ms) for readable scroll speed
+    mov cl, 3
+.tick_loop:
+    mov dx, [es:0x6C]      ; Current BIOS tick count
+.wait_tick:
+    mov ah, 0x01
+    int 0x16               ; Check key during delay too
+    jnz .got_key
+    cmp dx, [es:0x6C]
+    je .wait_tick
+    dec cl
+    jnz .tick_loop
+    jmp .poll
+.got_key:
     xor ah, ah
-    int 0x16
+    int 0x16               ; Consume the key
+    pop es
+    pop ds
+    pop dx
+    pop cx
     ret
 
 ; --------------------------
@@ -642,25 +671,6 @@ ui_confirm_install:
     pop ax
     ret
 
-; Wait for swap confirmation (one-floppy).
-ui_swap_prompt:
-    push ax
-    push si
-    push ds
-    push cs
-    pop ds
-    mov si, ui_log_swap
-    call ui_log_push
-    mov si, ui_status_swap
-    call ui_status
-    xor al, al
-    call ui_progress
-    call read_key
-    pop ds
-    pop si
-    pop ax
-    ret
-
 ; Render list of currently added users (inside the user dialog).
 ui_render_user_list:
     push ax
@@ -740,7 +750,8 @@ read_line_upper:
     mov [ui_in_col0], dl
     mov [ui_in_attr], bl
 
-    ; Cursor set
+    ; Show cursor for text input
+    call ui_show_cursor
     mov dh, [ui_in_row]
     mov dl, [ui_in_col]
     call ui_set_cursor
@@ -797,6 +808,7 @@ read_line_upper:
     jmp .rl_loop
 .rl_done:
     mov byte [di], 0
+    call ui_hide_cursor
     pop di
     pop dx
     pop cx
@@ -820,7 +832,8 @@ read_line_masked:
     mov [ui_in_col0], dl
     mov [ui_in_attr], bl
 
-    ; Cursor set
+    ; Show cursor for text input
+    call ui_show_cursor
     mov dh, [ui_in_row]
     mov dl, [ui_in_col]
     call ui_set_cursor
@@ -878,6 +891,7 @@ read_line_masked:
     jmp .rl_loop
 .rl_done:
     mov byte [di], 0
+    call ui_hide_cursor
     pop di
     pop dx
     pop cx
@@ -943,6 +957,7 @@ prompt_users:
     mov dh, 11
     mov dl, 18
     mov bl, UI_ATTR_TEXT
+.root_pw_loop:
     mov si, ui_users_root_pw
     call ui_puts
     ; Clear input field
@@ -956,6 +971,13 @@ prompt_users:
     mov dl, 44
     mov bl, UI_ATTR_TEXT
     call read_line_masked
+    ; root 비밀번호는 빈 값 허용. 비어있지 않으면 validate_password를 통과해야 한다.
+    mov si, line_buf
+    cmp byte [si], 0
+    je .root_pw_ok
+    call validate_password
+    jc .root_pw_invalid
+.root_pw_ok:
     call store_root_password
     ; Clear password field so the entered secret is not left visible on screen.
     mov dh, 11
@@ -963,6 +985,17 @@ prompt_users:
     mov cl, 12
     mov bl, UI_ATTR_BG
     call ui_fill_row
+
+
+        jmp .choose
+
+; invalid root password: show error and reprompt root password
+.root_pw_invalid:
+    mov si, ui_users_invalid_pw
+    call ui_status
+    xor al, al
+    call ui_progress
+    jmp .root_pw_loop
 
 .choose:
     call read_key
@@ -1041,7 +1074,7 @@ prompt_users:
     mov si, line_buf
     cmp byte [si], 0
     je  .invalid_pw
-    call validate_username
+    call validate_password
     jc  .invalid_pw
 
     mov al, [inst_user_count]
@@ -1135,6 +1168,47 @@ validate_username:
 .bad:
     stc
 .vret:
+    pop si
+    pop cx
+    pop ax
+    ret
+
+; validate_password
+; - line_buf 내용을 검사한다.
+; - 조건: 길이 1~8, ASCII 0x20~0x7E, ':'(구분자) 금지
+; - CF=1 invalid, CF=0 valid
+validate_password:
+    push ax
+    push cx
+    push si
+    mov si, line_buf
+    xor cx, cx
+
+.vloop:
+    mov al, [si]
+    cmp al, 0
+    je .vend
+    inc cx
+    cmp cx, 8
+    ja .bad
+    cmp al, ':'
+    je .bad
+    cmp al, 0x20
+    jb .bad
+    cmp al, 0x7F
+    je .bad
+    inc si
+    jmp .vloop
+
+.vend:
+    cmp cx, 0
+    je .bad
+    clc
+    jmp .done
+
+.bad:
+    stc
+.done:
     pop si
     pop cx
     pop ax
@@ -1276,7 +1350,9 @@ store_password_slot:
 ; Store line_buf into inst_root_pass
 store_root_password:
     push ax
+    push bx
     push cx
+    push dx
     push si
     push di
     push ds
@@ -1286,19 +1362,25 @@ store_root_password:
 
     mov si, line_buf
     mov di, inst_root_pass
-    mov cx, (LINE_BUF_MAX-1)
+    mov cx, LINE_BUF_MAX
 .rloop:
-    lodsb
-    stosb
+    mov al, [si]
+    mov [di], al
+    inc si
+    inc di
+    dec cx
+    jz  .done
     test al, al
     je  .done
-    loop .rloop
-    mov byte [di-1], 0
+    jmp .rloop
 .done:
+    mov byte [inst_root_pass + LINE_BUF_MAX - 1], 0
     pop ds
     pop di
     pop si
+    pop dx
     pop cx
+    pop bx
     pop ax
     ret
 
