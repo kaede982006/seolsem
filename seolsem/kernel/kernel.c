@@ -85,7 +85,7 @@ static void login_screen(void) {
                 print_message("Login name required.");
                 continue;
             }
-            wait_prompt("password: ", auth_pass);
+            wait_prompt_masked("password: ", auth_pass);
             sync_ds();
             if (user_login(buffer, auth_pass)) {
                 (void)sima_memclr(buffer, (UINT16)sizeof(buffer));

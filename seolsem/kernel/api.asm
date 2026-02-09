@@ -39,6 +39,7 @@ segment _TEXT class=CODE use16
 global _clear_screen
 global _print_message
 global _wait_prompt
+global _wait_prompt_masked
 global _read_key
 global _set_cursor
 global _write_char
@@ -46,6 +47,11 @@ global _sync_ds
 global _enable_irq
 global _disable_irq
 global _kbd_isr
+global _debug_trigger_div0
+global _debug_trigger_ud
+global _debug_trigger_gp
+global _debug_trigger_bp
+global _debug_trigger_of
 
 ; ------------------------------------------------------------
 ; Screen
@@ -126,6 +132,35 @@ _disable_irq:
     ret
 
 ; ------------------------------------------------------------
+; Exception debug triggers
+; ------------------------------------------------------------
+_debug_trigger_div0:
+    xor  dx, dx
+    mov  ax, 1
+    xor  cx, cx
+    div  cx
+    ret
+
+_debug_trigger_ud:
+    db 0x0F, 0x0B     ; UD2
+    ret
+
+_debug_trigger_gp:
+    mov  ax, 0x1234
+    mov  ds, ax
+    ret
+
+_debug_trigger_bp:
+    int3
+    ret
+
+_debug_trigger_of:
+    mov  ax, 0x7FFF
+    add  ax, 1
+    into
+    ret
+
+; ------------------------------------------------------------
 ; Keyboard
 ; ------------------------------------------------------------
 ; UINT16 read_key(void)
@@ -140,6 +175,11 @@ _read_key:
     mov  ax, ss
     mov  ds, ax
 
+    ; Queue-only path: avoids duplicate key events from mixed IRQ+poll handling.
+    sti
+.restart:
+    jmp  .wait_key
+
 .wait_key:
     ; 1) Prefer queued IRQ events (fast path)
     cli
@@ -147,12 +187,14 @@ _read_key:
     cmp  bl, [_kbd_q_tail]
     jne  .have_key
     sti
+    jmp  .restart
 
-    ; 2) Poll i8042 as a fallback (works even if IRQ/IDT is misconfigured)
+    ; 2) Poll fallback (kept for compatibility; currently unreachable)
+.poll_wait:
 .poll:
     in   al, KBD_STATUS
     test al, 0x01
-    jz   .wait_key
+    jz   .restart
     test al, 0x20                 ; AUX data (mouse) -> consume and ignore
     jnz  .poll_consume
     cli
@@ -166,8 +208,13 @@ _read_key:
     jne  .p_not_ext
     mov  byte [_kbd_ext], 1
     sti
-    jmp  .wait_key
+    jmp  .restart
 .p_not_ext:
+    cmp  al, 0xF0
+    je   .p_break_prefix
+    cmp  byte [_kbd_break], 0
+    jne  .p_break_follow
+
     cmp  al, 0x2A
     je   .p_shift_on
     cmp  al, 0x36
@@ -180,8 +227,18 @@ _read_key:
     je   .p_ctrl_on
     cmp  al, 0x9D
     je   .p_ctrl_off
+    cmp  al, 0x38        ; Alt press
+    je   .p_alt_on
+    cmp  al, 0xB8        ; Alt release
+    je   .p_alt_off
     test al, 0x80
-    jnz  .p_clear_ext
+    jnz  .p_release_set1
+
+    xor  bx, bx
+    mov  bl, al
+    cmp  byte [_kbd_down + bx], 0
+    jne  .p_clear_ext
+    mov  byte [_kbd_down + bx], 1
 
     mov  ah, al                   ; scan
     cmp  byte [_kbd_ext], 0
@@ -216,7 +273,62 @@ _read_key:
     mov  byte [_kbd_ext], 0
     xor  ax, ax
     sti
-    jmp  .wait_key
+    jmp  .restart
+
+.p_break_prefix:
+    mov  byte [_kbd_break], 1
+    sti
+    jmp  .restart
+
+.p_break_follow:
+    mov  byte [_kbd_break], 0
+    xor  bx, bx
+    mov  bl, al
+    cmp  bl, 0x80
+    jae  .p_break_follow_no_keyup
+    mov  byte [_kbd_down + bx], 0
+.p_break_follow_no_keyup:
+    cmp  al, 0x2A
+    je   .p_break_shift_off
+    cmp  al, 0x36
+    je   .p_break_shift_off
+    cmp  al, 0x12
+    je   .p_break_shift_off
+    cmp  al, 0x59
+    je   .p_break_shift_off
+    cmp  al, 0x1D
+    je   .p_break_ctrl_off
+    cmp  al, 0x14
+    je   .p_break_ctrl_off
+    cmp  al, 0x38
+    je   .p_break_alt_off
+    cmp  al, 0x11
+    je   .p_break_alt_off
+    mov  byte [_kbd_ext], 0
+    sti
+    jmp  .restart
+.p_break_shift_off:
+    mov  byte [_kbd_shift], 0
+    mov  byte [_kbd_ext], 0
+    sti
+    jmp  .restart
+.p_break_ctrl_off:
+    mov  byte [_kbd_ctrl], 0
+    mov  byte [_kbd_ext], 0
+    sti
+    jmp  .restart
+.p_break_alt_off:
+    mov  byte [_kbd_alt], 0
+    mov  byte [_kbd_ext], 0
+    sti
+    jmp  .restart
+
+.p_release_set1:
+    xor  bx, bx
+    mov  bl, al
+    and  bl, 0x7F
+    mov  byte [_kbd_down + bx], 0
+    jmp  .p_clear_ext
 
 .p_shift_on:
     mov  byte [_kbd_shift], 1
@@ -230,14 +342,20 @@ _read_key:
 .p_ctrl_off:
     mov  byte [_kbd_ctrl], 0
     jmp  .p_clear_ext
+.p_alt_on:
+    mov  byte [_kbd_alt], 1
+    jmp  .p_clear_ext
+.p_alt_off:
+    mov  byte [_kbd_alt], 0
+    jmp  .p_clear_ext
 .p_clear_ext:
     mov  byte [_kbd_ext], 0
     sti
-    jmp  .wait_key
+    jmp  .restart
 
 .poll_consume:
     in   al, KBD_DATA
-    jmp  .wait_key
+    jmp  .restart
 
 .have_key:
     mov  bl, [_kbd_q_tail]
@@ -290,6 +408,10 @@ _kbd_isr:
     mov  byte [_kbd_ext], 1
     jmp  .drain
 .not_ext_prefix:
+    cmp  al, 0xF0
+    je   .break_prefix
+    cmp  byte [_kbd_break], 0
+    jne  .break_follow
 
     ; Shift press/release
     cmp  al, 0x2A
@@ -307,9 +429,21 @@ _kbd_isr:
     cmp  al, 0x9D
     je   .ctrl_off
 
+    ; Alt press/release
+    cmp  al, 0x38
+    je   .alt_on
+    cmp  al, 0xB8
+    je   .alt_off
+
     ; Ignore break codes for regular keys
     test al, 0x80
-    jnz  .clear_ext_only
+    jnz  .release_set1
+
+    xor  bx, bx
+    mov  bl, al
+    cmp  byte [_kbd_down + bx], 0
+    jne  .clear_ext_only
+    mov  byte [_kbd_down + bx], 1
 
     ; AX = event (scan<<8 | ascii)
     mov  ah, al
@@ -374,10 +508,66 @@ _kbd_isr:
 .ctrl_off:
     mov  byte [_kbd_ctrl], 0
     jmp  .clear_ext_only
+.alt_on:
+    mov  byte [_kbd_alt], 1
+    jmp  .clear_ext_only
+.alt_off:
+    mov  byte [_kbd_alt], 0
+    jmp  .clear_ext_only
 
 .clear_ext_only:
     mov  byte [_kbd_ext], 0
     jmp  .drain
+
+.break_prefix:
+    mov  byte [_kbd_break], 1
+    jmp  .drain
+
+.break_follow:
+    mov  byte [_kbd_break], 0
+    xor  bx, bx
+    mov  bl, al
+    cmp  bl, 0x80
+    jae  .break_follow_no_keyup
+    mov  byte [_kbd_down + bx], 0
+.break_follow_no_keyup:
+    cmp  al, 0x2A
+    je   .break_shift_off
+    cmp  al, 0x36
+    je   .break_shift_off
+    cmp  al, 0x12
+    je   .break_shift_off
+    cmp  al, 0x59
+    je   .break_shift_off
+    cmp  al, 0x1D
+    je   .break_ctrl_off
+    cmp  al, 0x14
+    je   .break_ctrl_off
+    cmp  al, 0x38
+    je   .break_alt_off
+    cmp  al, 0x11
+    je   .break_alt_off
+    mov  byte [_kbd_ext], 0
+    jmp  .drain
+.break_shift_off:
+    mov  byte [_kbd_shift], 0
+    mov  byte [_kbd_ext], 0
+    jmp  .drain
+.break_ctrl_off:
+    mov  byte [_kbd_ctrl], 0
+    mov  byte [_kbd_ext], 0
+    jmp  .drain
+.break_alt_off:
+    mov  byte [_kbd_alt], 0
+    mov  byte [_kbd_ext], 0
+    jmp  .drain
+
+.release_set1:
+    xor  bx, bx
+    mov  bl, al
+    and  bl, 0x7F
+    mov  byte [_kbd_down + bx], 0
+    jmp  .clear_ext_only
 
 .eoi:
     mov  al, 0x20
@@ -405,7 +595,21 @@ _wait_prompt:
 
     mov  ax, ss
     mov  ds, ax
+    mov  byte [_input_mask], 0
+    jmp  wait_prompt_common_start
 
+_wait_prompt_masked:
+    push bp
+    mov  bp, sp
+    pusha
+    push ds
+    push es
+
+    mov  ax, ss
+    mov  ds, ax
+    mov  byte [_input_mask], '*'
+
+wait_prompt_common_start:
     mov  ax, PM_VIDEO_SEL
     mov  es, ax
     cld
@@ -485,6 +689,11 @@ _wait_prompt:
 .store_char:
     mov  bl, al
     mov  cl, al
+    mov  al, [_input_mask]
+    cmp  al, 0
+    je   .show_input_char
+    mov  cl, al
+.show_input_char:
     call .put_char_cl
     mov  [ss:si], bl
     inc  si
@@ -912,6 +1121,8 @@ global _line_end
 global _kbd_shift
 global _kbd_ctrl
 global _kbd_ext
+global _kbd_alt
+global _kbd_break
 
 _line       dw 0
 _di_pos     dw 0
@@ -919,10 +1130,14 @@ _line_end   dw 0
 _kbd_shift  db 0
 _kbd_ctrl   db 0
 _kbd_ext    db 0
+_kbd_alt    db 0
+_kbd_break  db 0
+_kbd_down   times 128 db 0
 _input_col  db 0
 _input_row  db 0
 _input_start_col db 0
 _input_start_row db 0
+_input_mask db 0
     ; software cursor state
     _soft_cur_active db 0
     _soft_cur_row    db 0
@@ -940,14 +1155,14 @@ _kbd_queue  times KBD_QUEUE_SIZE dw 0
 segment _TEXT
 
 kbd_map:
-    db 0,0,'1','2','3','4','5','6','7','8','9','0','-','=',8,9
+    db 0,27,'1','2','3','4','5','6','7','8','9','0','-','=',8,9
     db 'q','w','e','r','t','y','u','i','o','p','[',']',13,0,'a','s'
     db 'd','f','g','h','j','k','l',';',39,'`',0,'\','z','x','c','v'
     db 'b','n','m',',','.','/',0,'*',0,' ',0
     times (128-($-kbd_map)) db 0
 
 kbd_map_shift:
-    db 0,0,'!','@','#','$','%','^','&','*','(',')','_','+',8,9
+    db 0,27,'!','@','#','$','%','^','&','*','(',')','_','+',8,9
     db 'Q','W','E','R','T','Y','U','I','O','P','{','}',13,0,'A','S'
     db 'D','F','G','H','J','K','L',':','"','~',0,'|','Z','X','C','V'
     db 'B','N','M','<','>','?',0,'*',0,' ',0

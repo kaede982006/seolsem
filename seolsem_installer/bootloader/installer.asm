@@ -63,7 +63,9 @@ start:
     call ui_confirm_install
     jc .cancel
 
-    ; Optional: collect user list to pre-create /ETC/PASSWD and /HOME entries.
+    ; Account setup:
+    ;  - Step 1: configure ROOT password
+    ;  - Step 2: optionally add normal users
     call prompt_users
 
     ; ---- Progress UI ----
@@ -917,7 +919,86 @@ prompt_users:
     mov byte [inst_user_count], 0
     mov byte [inst_root_pass], 0
 
-    ; Draw user setup dialog
+    ; -------------------------------
+    ; Step 1/2: ROOT password setup
+    ; -------------------------------
+    call ui_draw_base
+    xor bx, bx
+    mov al, 0
+    call ui_steps_render
+    mov si, ui_status_root_pw
+    call ui_status
+    xor al, al
+    call ui_progress
+
+    ; Dialog box
+    mov dh, 4
+    mov dl, 14
+    mov ch, 20
+    mov cl, 65
+    mov bh, UI_ATTR_BORDER
+    mov bl, UI_ATTR_BG
+    call ui_draw_box
+
+    mov dh, 5
+    mov dl, 24
+    mov bl, UI_ATTR_BORDER
+    mov si, ui_root_title
+    call ui_puts
+
+    mov dh, 7
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_root_desc1
+    call ui_puts
+
+    mov dh, 8
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_root_desc2
+    call ui_puts
+
+    mov dh, 9
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_root_desc3
+    call ui_puts
+
+    mov dh, 12
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+.root_pw_loop:
+    mov si, ui_root_pw_label
+    call ui_puts
+    ; Clear input field
+    mov dh, 12
+    mov dl, 46
+    mov cl, 12
+    mov bl, UI_ATTR_BG
+    call ui_fill_row
+    ; Read root password into line_buf at (12,46) (blank allowed)
+    mov dh, 12
+    mov dl, 46
+    mov bl, UI_ATTR_TEXT
+    call read_line_masked
+    ; root 비밀번호는 빈 값 허용. 비어있지 않으면 validate_password를 통과해야 한다.
+    mov si, line_buf
+    cmp byte [si], 0
+    je .root_pw_ok
+    call validate_password
+    jc .root_pw_invalid
+.root_pw_ok:
+    call store_root_password
+    ; Clear password field so the entered secret is not left visible on screen.
+    mov dh, 12
+    mov dl, 46
+    mov cl, 12
+    mov bl, UI_ATTR_BG
+    call ui_fill_row
+
+    ; -------------------------------
+    ; Step 2/2: optional user setup
+    ; -------------------------------
     call ui_draw_base
     xor bx, bx
     mov al, 0
@@ -945,53 +1026,32 @@ prompt_users:
     mov dh, 7
     mov dl, 18
     mov bl, UI_ATTR_TEXT
-    mov si, ui_users_q
+    mov si, ui_users_desc1
+    call ui_puts
+
+    mov dh, 8
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
+    mov si, ui_users_desc2
     call ui_puts
 
     mov dh, 9
     mov dl, 18
     mov bl, UI_ATTR_TEXT
+    mov si, ui_users_q
+    call ui_puts
+
+    mov dh, 10
+    mov dl, 18
+    mov bl, UI_ATTR_TEXT
     mov si, ui_users_opt
     call ui_puts
 
-    mov dh, 11
-    mov dl, 18
-    mov bl, UI_ATTR_TEXT
-.root_pw_loop:
-    mov si, ui_users_root_pw
-    call ui_puts
-    ; Clear input field
-    mov dh, 11
-    mov dl, 44
-    mov cl, 12
-    mov bl, UI_ATTR_BG
-    call ui_fill_row
-    ; Read root password into line_buf at (11,44) (blank allowed)
-    mov dh, 11
-    mov dl, 44
-    mov bl, UI_ATTR_TEXT
-    call read_line_masked
-    ; root 비밀번호는 빈 값 허용. 비어있지 않으면 validate_password를 통과해야 한다.
-    mov si, line_buf
-    cmp byte [si], 0
-    je .root_pw_ok
-    call validate_password
-    jc .root_pw_invalid
-.root_pw_ok:
-    call store_root_password
-    ; Clear password field so the entered secret is not left visible on screen.
-    mov dh, 11
-    mov dl, 44
-    mov cl, 12
-    mov bl, UI_ATTR_BG
-    call ui_fill_row
-
-
-        jmp .choose
+    jmp .choose
 
 ; invalid root password: show error and reprompt root password
 .root_pw_invalid:
-    mov si, ui_users_invalid_pw
+    mov si, ui_root_invalid_pw
     call ui_status
     xor al, al
     call ui_progress
@@ -5531,6 +5591,7 @@ mbr_template:
 ui_status_confirm     db 'Confirm installation',0
 ui_status_type_yes    db 'Type YES to confirm',0
 ui_status_bad_yes     db 'Confirmation failed',0
+ui_status_root_pw     db 'Root password setup',0
 ui_status_users       db 'User setup (optional)',0
 ui_status_swap        db 'Swap to Seolsem disk and press any key',0
 ui_status_detect      db 'Detecting disks...',0
@@ -5586,10 +5647,18 @@ ui_confirm_line2      db 'Press Y to continue, N to cancel.',0
 ui_confirm_q          db 'Install to HDD? (Y/N)',0
 ui_confirm_type       db 'Type YES to confirm:',0
 
-ui_users_title        db 'User Setup',0
-ui_users_q            db 'Optional: add user accounts now.',0
+ui_root_title         db 'Root Account Setup',0
+ui_root_desc1         db 'Step 1/2: Configure ROOT account.',0
+ui_root_desc2         db 'ROOT has full system permissions.',0
+ui_root_desc3         db 'Leave password blank to disable password.',0
+ui_root_pw_label      db 'Root password (blank=none):',0
+ui_root_invalid_pw    db 'Invalid root password.',0
+
+ui_users_title        db 'User Accounts (Optional)',0
+ui_users_desc1        db 'Step 2/2: Add normal user accounts.',0
+ui_users_desc2        db 'Press ENTER on username to finish.',0
+ui_users_q            db 'Add users now?',0
 ui_users_opt          db '[N]o (root only)    [Y]es (add users)',0
-ui_users_root_pw      db 'Root password (blank=none):',0
 ui_users_list         db 'Users:',0
 ui_users_name         db 'Username (1-8):',0
 ui_users_pass         db 'Password (1-8):',0

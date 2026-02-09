@@ -4,6 +4,9 @@ AS    := nasm
 PY    ?= python3
 QEMU  ?= qemu-system-i386
 QEMUIMG ?= qemu-img
+QEMU_AUDIO_DRV ?= alsa
+QEMU_AUDIO_ID ?= snd0
+QEMU_AUDIO_ARGS ?= -machine pc,pcspk-audiodev=$(QEMU_AUDIO_ID) -audiodev $(QEMU_AUDIO_DRV),id=$(QEMU_AUDIO_ID)
 
 SEOLSEM_IMG ?= ../seolsem/seolsem.img
 
@@ -60,7 +63,7 @@ $(HDD): | $(BUILDDIR)
 run: $(IMG) hdd $(SEOLSEM_IMG)
 	@echo "When prompted to swap disks, use QEMU monitor command:"
 	@echo "  change floppy0 $(SEOLSEM_IMG)"
-	$(QEMU) -m 16 -boot a -monitor stdio \
+	$(QEMU) $(QEMU_AUDIO_ARGS) -m 16 -boot a -monitor stdio \
 		-drive if=floppy,format=raw,file=$(IMG) \
 		-drive if=ide,format=raw,file=$(HDD)
 

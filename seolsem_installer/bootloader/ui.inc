@@ -108,7 +108,7 @@ ui_step1 db 'Partition (MBR)',0
 ui_step2 db 'Format FAT32',0
 ui_step3 db 'Copy boot/stage2',0
 ui_step4 db 'Copy system files',0
-ui_step5 db 'Create users',0
+ui_step5 db 'Setup accounts',0
 ui_step6 db 'Finalize',0
 
 ; ------------------------------------------------------------
