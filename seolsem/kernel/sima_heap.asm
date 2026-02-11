@@ -8,23 +8,34 @@ global _sima_heap_set,   sima_heap_set
 global _sima_malloc,     sima_malloc
 global _sima_free_all,   sima_free_all
 global _sima_heap_remaining, sima_heap_remaining
+global _sima_heap_mark, sima_heap_mark
+global _sima_heap_restore, sima_heap_restore
 
 ; ----- 설정 -----
 %ifndef SIMA_HEAP_SIZE
-%define SIMA_HEAP_SIZE  (16*1024)    ; 필요시 Makefile에서 -DSIMA_HEAP_SIZE=… 로 조절
+%define SIMA_HEAP_SIZE  (17*1024)    ; 필요시 Makefile에서 -DSIMA_HEAP_SIZE=… 로 조절
 %endif
+
+; 커널 스택은 힙 버퍼 상단 일부를 사용한다(스택은 downward).
+; 힙 할당이 스택 영역을 침범하지 않도록 usable capacity 를 줄인다.
+%ifndef SIMA_KERNEL_STACK_RESERVE
+%define SIMA_KERNEL_STACK_RESERVE  1024
+%endif
+%define SIMA_HEAP_USABLE (SIMA_HEAP_SIZE - SIMA_KERNEL_STACK_RESERVE)
 
 ; ----- 상태 -----
 segment _BSS class=BSS use16
 align 2
+global sima_heap_buf, sima_heap_buf_end
 sima_heap_buf:    resb  SIMA_HEAP_SIZE    ; 내부 정적 힙 버퍼
+sima_heap_buf_end: resb 0
 
 segment _DATA class=DATA use16
 align 2
 heap_base_seg:    dw 0
 heap_base_off:    dw 0
 heap_top_off:     dw 0                    ; 사용 중 오프셋
-heap_cap:         dw SIMA_HEAP_SIZE
+heap_cap:         dw SIMA_HEAP_USABLE
 
 segment _TEXT class=CODE use16
 
@@ -51,7 +62,7 @@ sima_heap_init:
     mov  [heap_base_seg], ax
 
     mov  word [heap_top_off], 0
-    mov  ax, SIMA_HEAP_SIZE
+    mov  ax, SIMA_HEAP_USABLE
     mov  [heap_cap], ax
 
     pop  ax
@@ -131,6 +142,29 @@ sima_heap_remaining:
     mov  bp, sp
     mov  ax, [heap_cap]
     sub  ax, [heap_top_off]
+    pop  bp
+    ret
+
+; UINT16 sima_heap_mark(void)
+_sima_heap_mark:
+sima_heap_mark:
+    push bp
+    mov  bp, sp
+    mov  ax, [heap_top_off]
+    pop  bp
+    ret
+
+; void sima_heap_restore(UINT16 mark)
+_sima_heap_restore:
+sima_heap_restore:
+    push bp
+    mov  bp, sp
+    mov  ax, [bp+4]
+    cmp  ax, [heap_cap]
+    jbe  .ok
+    mov  ax, [heap_cap]
+.ok:
+    mov  [heap_top_off], ax
     pop  bp
     ret
 

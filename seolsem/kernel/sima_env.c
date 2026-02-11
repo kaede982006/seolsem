@@ -100,8 +100,12 @@ BOOL env_init(void) {
     UINT32 start = 0;
 
     env_clear();
+    /* Keep sane defaults even when XENV.ENV is not present. */
+    env_set("PATH", "/BIN");
+    env_set("HOME", "/");
+
     if (!fs_read("/XENV.ENV", buffer, FS_BLOCK_SIZE, &size)) {
-        return FALSE;
+        return TRUE;
     }
 
     buffer[size] = '\0';

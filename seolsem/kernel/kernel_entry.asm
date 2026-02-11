@@ -3,6 +3,7 @@ extern _kernel_main
 extern _sima_heap_init
 extern __bss_start
 extern __bss_end
+extern sima_heap_buf_end
 extern _kbd_isr
 global _start
 
@@ -22,10 +23,13 @@ _start:
     ; ------------------------------
     ; Build GDT/IDT (based on real-mode CS/DS) and enter 16-bit Protected Mode
     ; ------------------------------
-    ; Small memory model uses near pointers for locals; keep SS=DS while in real mode too.
+    ; IMPORTANT: Do not use 0xFFFE as the kernel stack for anything that can
+    ; consume more than ~128 bytes, because our flat 64KiB image has code near
+    ; the top of the segment. Use the top of the heap buffer instead.
     mov  ax, ds
     mov  ss, ax
-    mov  sp, 0xFFFE
+    mov  sp, sima_heap_buf_end
+    and  sp, 0xFFFE
     mov  bp, sp
 
     call pm_enter_16
@@ -50,6 +54,13 @@ _start:
     xor  ax, ax
     rep  stosb
 
+    ; Switch to a safe stack in (cleared) BSS/heap area before calling C code.
+    mov  ax, ds
+    mov  ss, ax
+    mov  sp, sima_heap_buf_end
+    and  sp, 0xFFFE
+    mov  bp, sp
+
     ; 내부 아레나 힙 초기화 (freestanding)
     call _sima_heap_init
 
@@ -68,6 +79,7 @@ _start:
 %define PM_DATA_SEL  0x10
 %define PM_VIDEO_SEL 0x18
 %define PM_EXC_ATTR  0x4F
+%define PM_IDT_ENTRIES 48
 %define PM_VGA_MISC_READ 0x3CC
 %define PM_CRTC_IDX_C 0x3D4
 %define PM_CRTC_IDX_M 0x3B4
@@ -202,7 +214,7 @@ pm_build_idt:
     ; Fill IDT with a safe IRET gate first.
     mov  ax, pm_isr_iret
     mov  di, pm_idt
-    mov  cx, 256
+    mov  cx, PM_IDT_ENTRIES
 .fill:
     mov  word [di + 0], ax             ; offset low
     mov  word [di + 2], PM_CODE_SEL    ; selector
@@ -725,7 +737,7 @@ pm_gdtr:
 
 align 8
 pm_idt:
-    times 256 dq 0
+    times PM_IDT_ENTRIES dq 0
 pm_idt_end:
 
 pm_idtr:

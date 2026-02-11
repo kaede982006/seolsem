@@ -38,6 +38,8 @@ BOOL fs_dir_read(FS_DIR *dir, FS_DIRENT *out);
 
 BOOL fs_read(const char *path, UINT8 *out, UINT32 out_cap, UINT32 *out_size);
 BOOL fs_read_in_dir(const char *dir_name, const char *name, UINT8 *out, UINT32 out_cap, UINT32 *out_size);
+BOOL fs_stat(const char *path, FS_DIRENT *out_ent);
+BOOL fs_stat_in_dir(const char *dir_name, const char *name, FS_DIRENT *out_ent);
 
 BOOL fs_is_executable(const char *path);
 BOOL fs_is_executable_in_dir(const char *dir_name, const char *name);

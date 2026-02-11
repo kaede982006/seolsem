@@ -1,0 +1,7 @@
+{
+  "entries": [
+    { "path": "BIN/HELLO.XEF", "src": "bin/HELLO.XEF" },
+    { "path": "BIN/CALC.XEF", "src": "bin/CALC.XEF" },
+    { "path": "BIN/EDIT.XEF", "src": "bin/EDIT.XEF" }
+  ]
+}

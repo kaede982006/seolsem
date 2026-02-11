@@ -5,20 +5,20 @@
 #include "sima_fs.h"
 #include "sima_env.h"
 #include "sima_user.h"
+#include "sima_heap.h"
 
-static char current_path[256];
-static char buffer[256];
+static char current_path[128];
+static char buffer[64];
 static char auth_pass[64];
 
 #define PROMPT_PATH_MAX 48
 
 static void build_prompt(char *out, UINT16 out_cap) {
     char cwd[FS_PATH_MAX];
-    char display[FS_PATH_MAX];
-    char display_trim[FS_PATH_MAX];
     const char *user;
     const char *home;
-    UINT16 display_len;
+    UINT16 display_len = 0;
+    const char *display_ptr = cwd;
     UINT16 keep_len;
     UINT16 i;
 
@@ -26,31 +26,32 @@ static void build_prompt(char *out, UINT16 out_cap) {
     if (!fs_get_cwd(cwd, (UINT16)sizeof(cwd))) {
         sima_strcpy(cwd, (UINT16)sizeof(cwd), "/");
     }
-
-    sima_memclr(display, (UINT16)sizeof(display));
+    sima_memclr(out, out_cap);
     home = env_get("HOME");
     if (home && home[0] != '\0' &&
         !(home[0] == '/' && home[1] == '\0')) {
         /* If cwd starts with HOME, display it as ~... (Linux-like prompt). */
-        UINT16 i = 0;
-        while (home[i] != '\0' && cwd[i] == home[i]) ++i;
-        if (home[i] == '\0' && (cwd[i] == '\0' || cwd[i] == '/' || cwd[i] == '\\')) {
-            sima_strcpy(display, (UINT16)sizeof(display), "~");
-            sima_strcat(display, (UINT16)sizeof(display), &cwd[i]);
+        UINT16 j = 0;
+        while (home[j] != '\0' && cwd[j] == home[j]) ++j;
+        if (home[j] == '\0' && (cwd[j] == '\0' || cwd[j] == '/' || cwd[j] == '\\')) {
+            sima_strcpy(out, out_cap, "~");
+            sima_strcat(out, out_cap, &cwd[j]);
+            display_ptr = out;
         }
     }
-    if (display[0] == '\0') {
-        sima_strcpy(display, (UINT16)sizeof(display), cwd);
-    }
-
-    display_len = sima_strlen(display);
+    display_len = sima_strlen(display_ptr);
     if (display_len > PROMPT_PATH_MAX) {
-        sima_memclr(display_trim, (UINT16)sizeof(display_trim));
-        sima_strcpy(display_trim, (UINT16)sizeof(display_trim), "...");
+        sima_memclr(cwd, (UINT16)sizeof(cwd));
+        sima_strcpy(cwd, (UINT16)sizeof(cwd), "...");
         keep_len = (UINT16)(PROMPT_PATH_MAX - 3);
         i = (UINT16)(display_len - keep_len);
-        sima_strcat(display_trim, (UINT16)sizeof(display_trim), &display[i]);
-        sima_strcpy(display, (UINT16)sizeof(display), display_trim);
+        sima_strcat(cwd, (UINT16)sizeof(cwd), &display_ptr[i]);
+        display_ptr = cwd;
+    }
+    if (display_ptr == out) {
+        sima_memclr(cwd, (UINT16)sizeof(cwd));
+        sima_strcpy(cwd, (UINT16)sizeof(cwd), out);
+        display_ptr = cwd;
     }
 
     user = env_get("USER");
@@ -60,7 +61,7 @@ static void build_prompt(char *out, UINT16 out_cap) {
     sima_strcpy(out, out_cap, "[");
     sima_strcat(out, out_cap, user);
     sima_strcat(out, out_cap, "@");
-    sima_strcat(out, out_cap, display);
+    sima_strcat(out, out_cap, display_ptr);
     sima_strcat(out, out_cap, "]$ ");
 }
 
@@ -103,6 +104,7 @@ static void login_screen(void) {
 void kernel_main(void) {
     BOOL fs_ok;
     BOOL env_ok;
+    UINT16 cmd_ok;
     /* Keep IRQs disabled during early init, then enable after IDT/PIC are ready. */
     disable_irq();
     sync_ds();
@@ -142,15 +144,12 @@ void kernel_main(void) {
 			continue;
         }
 
-		if(run_buffer(buffer)==FALSE) {
-			char temp[256];
-
-			sima_memclr(temp, (UINT16)sizeof(temp));
-			sima_strcpy(temp, sizeof(temp), "Command not found: ");
-			sima_strcat(temp, sizeof(temp), buffer);
-			sima_strcpy(buffer,sizeof(buffer),temp);
-
-			print_message(buffer);
+        cmd_ok = run_buffer(buffer) ? 1U : 0U;
+		if (cmd_ok == 0U) {
+            sima_memclr(current_path, (UINT16)sizeof(current_path));
+            sima_strcpy(current_path, (UINT16)sizeof(current_path), "Command not found: ");
+            sima_strcat(current_path, (UINT16)sizeof(current_path), buffer);
+			print_message(current_path);
             sync_ds();
 		}
 		(void)sima_memclr(buffer, (UINT16)sizeof(buffer));

@@ -9,13 +9,13 @@
 #include "sima_user.h"
 #include "sima_perm.h"
 
-static char wrong_command_message[256];
-static char message_buffer[256];
+static char wrong_command_message[128];
+static char message_buffer[160];
+static char argv_buffer[64];
+static PROGRAM_HANDLE g_loaded_handle = PROGRAM_HANDLE_INVALID;
 static void print_simple(const char *text);
-
-/* Editor constants (used by Edlin-style line editor) */
-#define EDIT_COLS 80
-#define EDIT_MAX_SIZE FS_BLOCK_SIZE
+static void print_program_result(PROGRAM_RESULT rc);
+static BOOL run_exec(const char *name);
 
 static const char* skip_tokens(const char *buffer, UINT16 count) {
     UINT16 i = 0;
@@ -225,24 +225,104 @@ static BOOL run_cls(void) {
     return TRUE;
 }
 
-static BOOL load_program_with_path(const char *name) {
+static BOOL has_xef_extension(const char *name) {
+    UINT16 len;
+    UINT8 c0;
+    UINT8 c1;
+    UINT8 c2;
+    UINT8 c3;
+    if (!name) return FALSE;
+    len = sima_strlen(name);
+    if (len < 4) return FALSE;
+    c0 = (UINT8)name[len - 4];
+    c1 = (UINT8)name[len - 3];
+    c2 = (UINT8)name[len - 2];
+    c3 = (UINT8)name[len - 1];
+    if (c1 >= 'a' && c1 <= 'z') c1 = (UINT8)(c1 - 'a' + 'A');
+    if (c2 >= 'a' && c2 <= 'z') c2 = (UINT8)(c2 - 'a' + 'A');
+    if (c3 >= 'a' && c3 <= 'z') c3 = (UINT8)(c3 - 'a' + 'A');
+    return (c0 == '.' && c1 == 'X' && c2 == 'E' && c3 == 'F') ? TRUE : FALSE;
+}
+
+static void print_program_result(PROGRAM_RESULT rc) {
+    char msg[96];
+    if (rc == PROGRAM_OK) return;
+    sima_memclr(msg, (UINT16)sizeof(msg));
+    (void)program_loader_result_message(rc, msg, (UINT16)sizeof(msg));
+    print_message(msg);
+}
+
+static PROGRAM_RESULT load_program_candidate(const char *dir, const char *name, PROGRAM_HANDLE *out_handle) {
+    if (!name || name[0] == '\0' || !out_handle) return PROGRAM_ERR_INVALID_ARG;
+    if (dir && dir[0] != '\0') {
+        return program_loader_open_in_dir(dir, name, out_handle);
+    }
+    return program_loader_open(name, out_handle);
+}
+
+static PROGRAM_RESULT load_program_with_optional_ext(const char *dir, const char *name, PROGRAM_HANDLE *out_handle) {
+    PROGRAM_RESULT rc;
+    PROGRAM_RESULT best;
+    char with_ext[FS_PATH_MAX];
+
+    if (!name || name[0] == '\0' || !out_handle) return PROGRAM_ERR_INVALID_ARG;
+
+    rc = load_program_candidate(dir, name, out_handle);
+    if (rc == PROGRAM_OK) return PROGRAM_OK;
+    if (rc != PROGRAM_ERR_NOT_FOUND && rc != PROGRAM_ERR_NOT_EXECUTABLE) return rc;
+    best = rc;
+
+    if (!has_xef_extension(name)) {
+        sima_memclr(with_ext, (UINT16)sizeof(with_ext));
+        if (!sima_strcpy(with_ext, (UINT16)sizeof(with_ext), name)) return PROGRAM_ERR_INVALID_ARG;
+        if (!sima_strcat(with_ext, (UINT16)sizeof(with_ext), ".XEF")) return PROGRAM_ERR_INVALID_ARG;
+        rc = load_program_candidate(dir, with_ext, out_handle);
+        if (rc == PROGRAM_OK) return PROGRAM_OK;
+        if (rc != PROGRAM_ERR_NOT_FOUND && rc != PROGRAM_ERR_NOT_EXECUTABLE) return rc;
+        if (best == PROGRAM_ERR_NOT_FOUND) best = rc;
+    }
+    return best;
+}
+
+static PROGRAM_RESULT load_program_with_path(const char *name, PROGRAM_HANDLE *out_handle) {
     const char *path;
     char path_buffer[64];
+    char abs_dir[64];
     char *dirs[8];
     UINT16 count;
     UINT16 i;
+    PROGRAM_RESULT rc;
+    PROGRAM_RESULT best = PROGRAM_ERR_NOT_FOUND;
 
-    if (program_load(name)) return TRUE;
+    if (!name || !out_handle) return PROGRAM_ERR_INVALID_ARG;
+
+    rc = load_program_with_optional_ext((const char*)0, name, out_handle);
+    if (rc == PROGRAM_OK) return PROGRAM_OK;
+    if (rc != PROGRAM_ERR_NOT_FOUND && rc != PROGRAM_ERR_NOT_EXECUTABLE) return rc;
+    best = rc;
+
     path = env_get("PATH");
-    if (!path) return FALSE;
+    if (!path) return best;
     if (!sima_strcpy(path_buffer, (UINT16)sizeof(path_buffer), path)) {
-        return FALSE;
+        return PROGRAM_ERR_INVALID_ARG;
     }
     count = sima_strcspl(path_buffer, ';', dirs, (UINT16)8);
     for (i = 0; i < count; ++i) {
-        if (program_load_in_dir(dirs[i], name)) return TRUE;
+        rc = load_program_with_optional_ext(dirs[i], name, out_handle);
+        if (rc == PROGRAM_OK) return PROGRAM_OK;
+        if (rc != PROGRAM_ERR_NOT_FOUND && rc != PROGRAM_ERR_NOT_EXECUTABLE) return rc;
+        if (best == PROGRAM_ERR_NOT_FOUND) best = rc;
+        if (dirs[i][0] != '/' && dirs[i][0] != '\\') {
+            sima_memclr(abs_dir, (UINT16)sizeof(abs_dir));
+            if (!sima_strcpy(abs_dir, (UINT16)sizeof(abs_dir), "/")) continue;
+            if (!sima_strcat(abs_dir, (UINT16)sizeof(abs_dir), dirs[i])) continue;
+            rc = load_program_with_optional_ext(abs_dir, name, out_handle);
+            if (rc == PROGRAM_OK) return PROGRAM_OK;
+            if (rc != PROGRAM_ERR_NOT_FOUND && rc != PROGRAM_ERR_NOT_EXECUTABLE) return rc;
+            if (best == PROGRAM_ERR_NOT_FOUND) best = rc;
+        }
     }
-    return FALSE;
+    return best;
 }
 
 static UINT8 man_upper(UINT8 ch) {
@@ -258,6 +338,19 @@ static BOOL man_topic_eq(const char *lhs, const char *rhs) {
         ++i;
     }
     return (lhs[i] == '\0' && rhs[i] == '\0') ? TRUE : FALSE;
+}
+
+static BOOL man_parse_section(const char *text, UINT8 *out_section) {
+    if (!text || text[0] == '\0' || text[1] != '\0') return FALSE;
+    if (text[0] == '1') {
+        if (out_section) *out_section = 1;
+        return TRUE;
+    }
+    if (text[0] == '7') {
+        if (out_section) *out_section = 7;
+        return TRUE;
+    }
+    return FALSE;
 }
 
 static BOOL man_wait_next(void) {
@@ -292,136 +385,109 @@ static BOOL man_show_page(const char *title, const char *const *lines, UINT16 li
     return TRUE;
 }
 
-static BOOL run_man(const char *topic) {
+static const char *const man_command_names[] = {
+    "ver", "help", "man", "cls",
+    "ls", "cd", "pwd", "cat", "write", "edit", "rm", "rmdir", "mkdir",
+    "load", "run", "exec", "sync", "diskinfo", "calc", "hello",
+    "whoami", "id", "users", "useradd", "passwd", "logout"
+};
+
+static const char *const man_topic_names[] = {
+    "system", "fs", "exec", "user", "display", "tools"
+};
+
+static BOOL man_in_table(const char *topic, const char *const *table, UINT16 table_count) {
+    UINT16 i;
+    if (!topic || !table) return FALSE;
+    for (i = 0; i < table_count; ++i) {
+        if (man_topic_eq(topic, table[i])) return TRUE;
+    }
+    return FALSE;
+}
+
+static void man_print_whatis_entry(const char *name, UINT8 section) {
+    char sec_text[2];
+    sec_text[0] = (section == 7) ? '7' : '1';
+    sec_text[1] = '\0';
+
+    sima_memclr(message_buffer, (UINT16)sizeof(message_buffer));
+    sima_strcpy(message_buffer, (UINT16)sizeof(message_buffer), name);
+    sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), " (");
+    sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), sec_text);
+    sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), ") - ");
+    if (section == 7) {
+        sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), "topic");
+    } else {
+        sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), "command");
+    }
+    print_message(message_buffer);
+}
+
+static BOOL man_lookup(const char *topic, const char **name_out, UINT8 *section_out) {
+    UINT16 i;
+    if (!topic || topic[0] == '\0') return FALSE;
+
+    for (i = 0; i < (UINT16)(sizeof(man_command_names) / sizeof(man_command_names[0])); ++i) {
+        if (man_topic_eq(topic, man_command_names[i])) {
+            if (name_out) *name_out = man_command_names[i];
+            if (section_out) *section_out = 1;
+            return TRUE;
+        }
+    }
+    for (i = 0; i < (UINT16)(sizeof(man_topic_names) / sizeof(man_topic_names[0])); ++i) {
+        if (man_topic_eq(topic, man_topic_names[i])) {
+            if (name_out) *name_out = man_topic_names[i];
+            if (section_out) *section_out = 7;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL run_man_topic(const char *topic) {
     static const char *const man_index[] = {
-        "Usage:",
-        "  man <topic>",
-        "  help <topic>",
-        "",
-        "Main topics:",
-        "  system  fs  exec  user  display  debug",
-        "",
-        "Command topics:",
-        "  ver help man cls",
-        "  ls cd pwd cat write edit rm rmdir mkdir",
-        "  load run exec sync diskinfo fault",
-        "  whoami id users useradd passwd logout",
-        "",
-        "Examples:",
-        "  man fs",
-        "  man exec",
-        "  man cd"
+        "man [section] <topic>",
+        "man -k <key> | man -f <name>",
+        "sections: 1=cmd, 7=topic",
+        "ex: man 1 ls"
     };
     static const char *const man_system[] = {
-        "system:",
-        "  ver             show OS version",
-        "  help [topic]    show manual index/page",
-        "  man [topic]     show manual page",
-        "  diskinfo        show disk and volume info",
-        "  fault <kind>    trigger CPU exception (debug)",
-        "",
-        "Notes:",
-        "  - command args support quotes",
-        "  - path and permission checks are Linux-like"
+        "system: ver help man diskinfo"
     };
     static const char *const man_fs[] = {
-        "fs:",
-        "  ls [path]       list directory entries",
-        "  cd [path]       change directory",
-        "  cd -            jump to previous directory",
-        "  pwd             print working directory",
-        "  cat <file>      print file content",
-        "  write <f> <txt> create/overwrite file",
-        "  edit <file>     open text editor",
-        "  rm <file>       delete file",
-        "  rmdir <dir>     remove empty directory",
-        "  mkdir <dir>     create directory",
-        "  sync            flush cached FAT sectors",
-        "",
-        "Path tips:",
-        "  - absolute: /BIN/HELLO.PRG",
-        "  - relative: ./memo.txt  ../",
-        "  - home: ~/notes.txt",
-        "  - non-root users are limited by policy"
+        "fs: ls cd pwd cat write edit rm rmdir mkdir sync"
     };
     static const char *const man_exec[] = {
-        "exec:",
-        "  load <file>     load .PRG script into memory",
-        "  run             run currently loaded program",
-        "  exec <file>     load and run immediately",
-        "",
-        "Program format:",
-        "  PRINT <text>",
-        "  CLS",
-        "  EXIT",
-        "",
-        "Search path:",
-        "  - current directory first",
-        "  - then PATH entries (default BIN)"
-    };
-    static const char *const man_debug[] = {
-        "fault:",
-        "  fault <kind>    intentionally trigger an exception",
-        "",
-        "Kinds:",
-        "  de|div0         divide error (#DE)",
-        "  bp|int3         breakpoint (#BP)",
-        "  ud|invalid      invalid opcode (#UD)",
-        "  gp              general protection (#GP)",
-        "  of|overflow     overflow (#OF via INTO)",
-        "",
-        "Use this command to verify exception screen output."
+        "exec: load <f> | run | exec <f>",
+        "single active process only"
     };
     static const char *const man_user[] = {
-        "user:",
-        "  whoami          print current user",
-        "  id              print current uid",
-        "  users           list users",
-        "  useradd <n> [p] add user (root only)",
-        "  passwd          change your password",
-        "  logout          return to login screen",
-        "",
-        "Default rules:",
-        "  - root uid is 0",
-        "  - user homes are under /HOME/<NAME>",
-        "  - /ETC/PASSWD is source of truth",
-        "  - login is only available from login screen"
+        "user: whoami id users useradd passwd logout",
+        "useradd: root only"
     };
     static const char *const man_display[] = {
-        "display:",
-        "  cls             clear text screen",
-        "",
-        "Editor keys:",
-        "  Ctrl+S          save",
-        "  Esc             save and exit",
-        "  Ctrl+Q          quit without saving",
-        "  Arrow/Home/End/Delete supported"
+        "display: cls"
+    };
+    static const char *const man_calc[] = {
+        "calc: a+ s- d* f/ g% h& j| k^ l<< ;>>",
+        "q/ESC quit"
+    };
+    static const char *const man_hello[] = {
+        "hello: run HELLO.XEF from PATH"
     };
     static const char *const man_cd[] = {
-        "cd:",
-        "  cd              move to HOME",
-        "  cd /            move to root",
-        "  cd -            move to previous directory",
-        "  cd <path>       move to path",
-        "",
-        "Examples:",
-        "  cd /BIN",
-        "  cd ..",
-        "  cd ~/DOCS"
+        "cd: [path] | / | - | (HOME)"
     };
 
     if (!topic || topic[0] == '\0') {
         return man_show_page("Index", man_index, (UINT16)(sizeof(man_index) / sizeof(man_index[0])));
     }
 
-    if (man_topic_eq(topic, "HELP") || man_topic_eq(topic, "MAN")) {
+    if (man_topic_eq(topic, "INDEX")) {
         return man_show_page("Index", man_index, (UINT16)(sizeof(man_index) / sizeof(man_index[0])));
     }
-    if (man_topic_eq(topic, "SYSTEM") || man_topic_eq(topic, "VER") || man_topic_eq(topic, "DISKINFO")) {
+    if (man_topic_eq(topic, "SYSTEM") || man_topic_eq(topic, "VER") || man_topic_eq(topic, "HELP") || man_topic_eq(topic, "MAN") || man_topic_eq(topic, "DISKINFO")) {
         return man_show_page("System", man_system, (UINT16)(sizeof(man_system) / sizeof(man_system[0])));
-    }
-    if (man_topic_eq(topic, "DEBUG") || man_topic_eq(topic, "FAULT")) {
-        return man_show_page("Debug", man_debug, (UINT16)(sizeof(man_debug) / sizeof(man_debug[0])));
     }
     if (man_topic_eq(topic, "FS") || man_topic_eq(topic, "LS") || man_topic_eq(topic, "PWD") ||
         man_topic_eq(topic, "CAT") || man_topic_eq(topic, "WRITE") || man_topic_eq(topic, "EDIT") ||
@@ -443,13 +509,84 @@ static BOOL run_man(const char *topic) {
     if (man_topic_eq(topic, "DISPLAY") || man_topic_eq(topic, "CLS")) {
         return man_show_page("Display", man_display, (UINT16)(sizeof(man_display) / sizeof(man_display[0])));
     }
+    if (man_topic_eq(topic, "TOOLS") || man_topic_eq(topic, "CALC")) {
+        return man_show_page("Calculator", man_calc, (UINT16)(sizeof(man_calc) / sizeof(man_calc[0])));
+    }
+    if (man_topic_eq(topic, "HELLO")) {
+        return man_show_page("Hello", man_hello, (UINT16)(sizeof(man_hello) / sizeof(man_hello[0])));
+    }
 
-    print_simple("No manual entry. Try: man");
+    print_simple("No manual entry.");
+    return TRUE;
+}
+
+static BOOL run_man(const char *topic) {
+    return run_man_topic(topic);
+}
+
+static BOOL run_man_with_section(const char *section, const char *topic) {
+    UINT8 sec = 0;
+    if (!section || !topic) return FALSE;
+    if (!man_parse_section(section, &sec)) {
+        print_simple("Supported sections: 1, 7");
+        return TRUE;
+    }
+    if (sec == 1) {
+        if (man_in_table(topic, man_topic_names, (UINT16)(sizeof(man_topic_names) / sizeof(man_topic_names[0])))) {
+            print_simple("No manual entry.");
+            return TRUE;
+        }
+        return run_man_topic(topic);
+    }
+
+    if (man_in_table(topic, man_topic_names, (UINT16)(sizeof(man_topic_names) / sizeof(man_topic_names[0])))) {
+        return run_man_topic(topic);
+    }
+
+    print_simple("No manual entry.");
+    return TRUE;
+}
+
+static BOOL run_man_whatis(const char *topic) {
+    const char *name = (const char*)0;
+    UINT8 section = 0;
+    if (!topic || topic[0] == '\0') return FALSE;
+    if (!man_lookup(topic, &name, &section)) {
+        print_simple("No manual entry.");
+        return TRUE;
+    }
+    man_print_whatis_entry(name, section);
+    return TRUE;
+}
+
+static BOOL run_man_apropos(const char *keyword) {
+    UINT16 i;
+    BOOL found = FALSE;
+    if (!keyword || keyword[0] == '\0') return FALSE;
+
+    for (i = 0; i < (UINT16)(sizeof(man_command_names) / sizeof(man_command_names[0])); ++i) {
+        if (sima_strstr(man_command_names[i], keyword) != (const char*)0) {
+            man_print_whatis_entry(man_command_names[i], 1);
+            found = TRUE;
+        }
+    }
+    for (i = 0; i < (UINT16)(sizeof(man_topic_names) / sizeof(man_topic_names[0])); ++i) {
+        if (sima_strstr(man_topic_names[i], keyword) != (const char*)0) {
+            man_print_whatis_entry(man_topic_names[i], 7);
+            found = TRUE;
+        }
+    }
+    if (!found) {
+        print_simple("Nothing appropriate.");
+    }
     return TRUE;
 }
 
 void run_help() {
-    (void)run_man((const char*)0);
+    print_message("commands:");
+    print_message("  ver help man cls ls cd pwd cat write edit rm rmdir mkdir");
+    print_message("  load run exec sync diskinfo calc hello whoami id users useradd");
+    print_message("  passwd logout");
 }
 
 static BOOL cd_expand_user(const char *path, char *out, UINT16 out_cap) {
@@ -599,7 +736,6 @@ static BOOL run_cat(const char *name) {
         return TRUE;
     }
     data[size] = '\0';
-    print_message("");
     print_message((const char*)data);
     return TRUE;
 }
@@ -617,786 +753,39 @@ static BOOL run_write(const char *name, const char *data) {
     return TRUE;
 }
 
-/* ============================================================
- * Vi-like Visual Editor for Seolsem
- * ============================================================ */
+static BOOL run_builtin_program(const char *primary, const char *fallback, const char *arg) {
+    PROGRAM_RESULT rc;
+    PROGRAM_HANDLE handle = PROGRAM_HANDLE_INVALID;
+    UINT16 status = 1;
 
-/* Editor constants */
-#define VI_ROWS 23       /* Visible text rows (screen 25 - 2 for status) */
-#define VI_STATUS_ROW 24 /* Status bar row (0-indexed) */
-
-/* Vi modes */
-#define VI_MODE_NORMAL   0
-#define VI_MODE_INSERT   1
-#define VI_MODE_COMMAND  2
-
-/* Key codes */
-#define KEY_ESC    0x1B
-#define KEY_ENTER  0x0D
-#define KEY_BACKSP 0x08
-#define KEY_UP     0x4800
-#define KEY_DOWN   0x5000
-#define KEY_LEFT   0x4B00
-#define KEY_RIGHT  0x4D00
-#define KEY_HOME   0x4700
-#define KEY_END    0x4F00
-#define KEY_PGUP   0x4900
-#define KEY_PGDN   0x5100
-#define KEY_DEL    0x5300
-
-/* Vi state */
-static UINT8 vi_mode = VI_MODE_NORMAL;
-static char vi_buffer[EDIT_MAX_SIZE + 1];
-static UINT16 vi_size = 0;
-static UINT16 vi_cursor = 0;        /* Byte position in buffer */
-static UINT16 vi_top_line = 0;      /* First visible line */
-static UINT16 vi_cur_row = 0;       /* Cursor row (screen, 0-based) */
-static UINT16 vi_cur_col = 0;       /* Cursor column (screen, 0-based) */
-static char vi_cmd_buf[64];         /* Command line buffer */
-static UINT16 vi_cmd_len = 0;
-static BOOL vi_modified = FALSE;
-static char vi_status_msg[64];      /* Status message */
-static char vi_yank_buf[EDIT_COLS + 2]; /* Yanked line buffer */
-static UINT16 vi_yank_len = 0;
-
-/* Forward declarations */
-static void vi_render_screen(void);
-static void vi_render_status(const char *filename);
-static void vi_cursor_sync(void);
-static UINT16 vi_get_line_start(UINT16 pos);
-static UINT16 vi_get_line_end(UINT16 pos);
-static UINT16 vi_count_lines(void);
-static UINT16 vi_line_to_pos(UINT16 line);
-static UINT16 vi_pos_to_line(UINT16 pos);
-static UINT16 vi_get_visual_col(UINT16 pos);
-static UINT16 vi_pos_at_visual_col(UINT16 line_start, UINT16 target_col);
-static BOOL vi_is_word_char(char ch);
-static void vi_move_line_first_nonblank(void);
-static void vi_move_word_forward(void);
-static void vi_move_word_backward(void);
-static BOOL vi_delete_to_eol(void);
-static BOOL vi_change_line(void);
-static BOOL vi_join_with_next_line(void);
-
-/* Get start of line containing pos */
-static UINT16 vi_get_line_start(UINT16 pos) {
-    while (pos > 0 && vi_buffer[pos - 1] != '\n') {
-        pos--;
+    rc = load_program_with_path(primary, &handle);
+    if (rc != PROGRAM_OK && fallback && fallback[0] != '\0') {
+        rc = load_program_with_path(fallback, &handle);
     }
-    return pos;
-}
-
-/* Get end of line (newline or buffer end) */
-static UINT16 vi_get_line_end(UINT16 pos) {
-    while (pos < vi_size && vi_buffer[pos] != '\n') {
-        pos++;
-    }
-    return pos;
-}
-
-/* Count total lines */
-static UINT16 vi_count_lines(void) {
-    UINT16 lines = 1;
-    UINT16 i;
-    if (vi_size == 0) return 1;
-    for (i = 0; i < vi_size; i++) {
-        if (vi_buffer[i] == '\n') {
-            lines++;
-        }
-    }
-    return lines;
-}
-
-/* Get buffer position for line number (0-based) */
-static UINT16 vi_line_to_pos(UINT16 line) {
-    UINT16 pos = 0;
-    UINT16 cur = 0;
-    while (pos < vi_size && cur < line) {
-        if (vi_buffer[pos] == '\n') cur++;
-        pos++;
-    }
-    return pos;
-}
-
-/* Get line number for buffer position (0-based) */
-static UINT16 vi_pos_to_line(UINT16 pos) {
-    UINT16 line = 0;
-    UINT16 i;
-    if (pos > vi_size) pos = vi_size;
-    for (i = 0; i < pos && i < vi_size; i++) {
-        if (vi_buffer[i] == '\n') line++;
-    }
-    return line;
-}
-
-/* Visual column with tab expansion for a buffer position */
-static UINT16 vi_get_visual_col(UINT16 pos) {
-    UINT16 line_start = vi_get_line_start(pos);
-    UINT16 col = 0;
-    UINT16 i = line_start;
-
-    while (i < pos && i < vi_size && vi_buffer[i] != '\n') {
-        if (vi_buffer[i] == '\t') {
-            col += (8 - (col % 8));
-        } else {
-            col++;
-        }
-        i++;
-    }
-    return col;
-}
-
-/* Find buffer position in line that matches target visual column */
-static UINT16 vi_pos_at_visual_col(UINT16 line_start, UINT16 target_col) {
-    UINT16 pos = line_start;
-    UINT16 col = 0;
-    UINT16 line_end = vi_get_line_end(line_start);
-
-    while (pos < line_end) {
-        UINT16 next_col = col + (vi_buffer[pos] == '\t' ? (8 - (col % 8)) : 1);
-        if (next_col > target_col) break;
-        col = next_col;
-        pos++;
-    }
-    return pos;
-}
-
-static BOOL vi_is_word_char(char ch) {
-    return (BOOL)(
-        (ch >= '0' && ch <= '9') ||
-        (ch >= 'A' && ch <= 'Z') ||
-        (ch >= 'a' && ch <= 'z') ||
-        ch == '_'
-    );
-}
-
-/* Move to first non-blank character of current line */
-static void vi_move_line_first_nonblank(void) {
-    UINT16 pos = vi_get_line_start(vi_cursor);
-    UINT16 end = vi_get_line_end(pos);
-    while (pos < end && (vi_buffer[pos] == ' ' || vi_buffer[pos] == '\t')) {
-        pos++;
-    }
-    vi_cursor = pos;
-}
-
-/* Sync cursor position (row/col) from buffer position */
-static void vi_cursor_sync(void) {
-    UINT16 cur_line = vi_pos_to_line(vi_cursor);
-
-    vi_cur_col = vi_get_visual_col(vi_cursor);
-    if (vi_cur_col >= EDIT_COLS) {
-        vi_cur_col = EDIT_COLS - 1;
-    }
-
-    /* Scroll if needed */
-    if (cur_line < vi_top_line) {
-        vi_top_line = cur_line;
-    } else if (cur_line >= vi_top_line + VI_ROWS) {
-        vi_top_line = cur_line - VI_ROWS + 1;
-    }
-
-    vi_cur_row = cur_line - vi_top_line;
-}
-
-/* Render visible portion of buffer */
-static void vi_render_screen(void) {
-    UINT16 screen_row;
-    UINT16 pos;
-    UINT16 line;
-    
-    clear_screen();
-    
-    pos = vi_line_to_pos(vi_top_line);
-    
-    for (screen_row = 0; screen_row < VI_ROWS; screen_row++) {
-        UINT16 col = 0;
-        line = vi_top_line + screen_row;
-        
-        if (line >= vi_count_lines()) {
-            /* Draw ~ for empty lines after EOF */
-            write_char(screen_row, 0, '~', 0x07);
-        } else {
-            /* Render line content */
-            while (pos < vi_size && vi_buffer[pos] != '\n' && col < EDIT_COLS - 1) {
-                char ch = vi_buffer[pos];
-                if (ch == '\t') {
-                    /* Tab expansion */
-                    UINT16 spaces = 8 - (col % 8);
-                    while (spaces-- > 0 && col < EDIT_COLS - 1) {
-                        write_char(screen_row, col++, ' ', 0x07);
-                    }
-                } else if (ch >= 32) {
-                    write_char(screen_row, col++, ch, 0x07);
-                }
-                pos++;
-            }
-            /* Skip past newline */
-            if (pos < vi_size && vi_buffer[pos] == '\n') pos++;
-        }
-    }
-}
-
-/* Render status bar */
-static void vi_render_status(const char *filename) {
-    char status[EDIT_COLS + 1];
-    char line_info[48];
-    UINT16 i;
-    UINT16 cur_line = vi_pos_to_line(vi_cursor) + 1;
-    UINT16 total_lines = vi_count_lines();
-    UINT16 cur_col = vi_get_visual_col(vi_cursor) + 1;
-    const char *mode_str;
-
-    (void)filename;
-    sima_memclr(status, sizeof(status));
-    sima_memclr(line_info, sizeof(line_info));
-
-    /* Mode indicator */
-    switch (vi_mode) {
-        case VI_MODE_INSERT:  mode_str = "-- INSERT --"; break;
-        case VI_MODE_COMMAND: mode_str = ":"; break;
-        default:              mode_str = ""; break;
-    }
-
-    if (vi_mode == VI_MODE_COMMAND) {
-        /* Show command line */
-        status[0] = ':';
-        sima_memmove(status + 1, vi_cmd_buf, vi_cmd_len);
-        status[vi_cmd_len + 1] = '\0';
-    } else if (vi_status_msg[0] != '\0') {
-        sima_strcpy(status, sizeof(status), vi_status_msg);
-        vi_status_msg[0] = '\0'; /* Clear after display */
-    } else {
-        sima_strcpy(status, sizeof(status), mode_str);
-    }
-
-    /* Line/column info on right: "Ln x/y Col z" */
-    sima_strcpy(line_info, sizeof(line_info), "Ln ");
-    {
-        char tmp[16];
-        sima_utoa(cur_line, tmp, sizeof(tmp), 10);
-        sima_strcat(line_info, sizeof(line_info), tmp);
-    }
-    sima_strcat(line_info, sizeof(line_info), "/");
-    {
-        char tmp[16];
-        sima_utoa(total_lines, tmp, sizeof(tmp), 10);
-        sima_strcat(line_info, sizeof(line_info), tmp);
-    }
-    sima_strcat(line_info, sizeof(line_info), " Col ");
-    {
-        char tmp[16];
-        sima_utoa(cur_col, tmp, sizeof(tmp), 10);
-        sima_strcat(line_info, sizeof(line_info), tmp);
-    }
-
-    /* Draw status bar with inverse video */
-    for (i = 0; i < EDIT_COLS; i++) {
-        char ch = (i < sima_strlen(status)) ? status[i] : ' ';
-        write_char(VI_STATUS_ROW, i, ch, 0x70); /* Inverse */
-    }
-
-    /* Overlay line info on right */
-    {
-        UINT16 info_len = sima_strlen(line_info);
-        UINT16 start_col = 0;
-        if (info_len < EDIT_COLS) {
-            start_col = EDIT_COLS - info_len - 1;
-        }
-        for (i = 0; i < info_len; i++) {
-            write_char(VI_STATUS_ROW, start_col + i, line_info[i], 0x70);
-        }
-    }
-
-    /* Show modified indicator */
-    if (vi_modified) {
-        write_char(VI_STATUS_ROW, EDIT_COLS - 1, '+', 0x70);
-    }
-}
-
-/* Insert character at cursor */
-static BOOL vi_insert_char(char ch) {
-    if (vi_size >= EDIT_MAX_SIZE) return FALSE;
-    
-    sima_memmove(vi_buffer + vi_cursor + 1, vi_buffer + vi_cursor, vi_size - vi_cursor);
-    vi_buffer[vi_cursor] = ch;
-    vi_size++;
-    vi_cursor++;
-    vi_modified = TRUE;
-    return TRUE;
-}
-
-/* Delete character at cursor */
-static BOOL vi_delete_char(void) {
-    if (vi_cursor >= vi_size) return FALSE;
-
-    sima_memmove(vi_buffer + vi_cursor, vi_buffer + vi_cursor + 1, vi_size - vi_cursor - 1);
-    vi_size--;
-    vi_modified = TRUE;
-    return TRUE;
-}
-
-/* Delete from cursor to end-of-line (excluding newline) */
-static BOOL vi_delete_to_eol(void) {
-    UINT16 end = vi_get_line_end(vi_cursor);
-    UINT16 del_len;
-
-    if (vi_cursor >= end) return FALSE;
-
-    del_len = end - vi_cursor;
-    sima_memmove(vi_buffer + vi_cursor, vi_buffer + end, vi_size - end);
-    vi_size -= del_len;
-    vi_modified = TRUE;
-    return TRUE;
-}
-
-/* Delete entire line */
-static BOOL vi_delete_line(void) {
-    UINT16 start = vi_get_line_start(vi_cursor);
-    UINT16 end = vi_get_line_end(vi_cursor);
-    UINT16 del_len;
-    
-    /* Include newline if present */
-    if (end < vi_size && vi_buffer[end] == '\n') end++;
-    
-    del_len = end - start;
-    if (del_len == 0) return FALSE;
-    
-    /* Yank before delete */
-    if (del_len < sizeof(vi_yank_buf)) {
-        sima_memmove(vi_yank_buf, vi_buffer + start, del_len);
-        vi_yank_len = del_len;
-    }
-    
-    sima_memmove(vi_buffer + start, vi_buffer + end, vi_size - end);
-    vi_size -= del_len;
-    vi_cursor = start;
-    
-    /* Ensure cursor is valid */
-    if (vi_cursor >= vi_size && vi_size > 0) {
-        vi_cursor = vi_size - 1;
-    }
-    
-    vi_modified = TRUE;
-    return TRUE;
-}
-
-/* Change whole line: clear content and keep cursor at line start */
-static BOOL vi_change_line(void) {
-    UINT16 start = vi_get_line_start(vi_cursor);
-    UINT16 end = vi_get_line_end(vi_cursor);
-    UINT16 del_len;
-
-    vi_cursor = start;
-    if (start >= end) return TRUE; /* already empty line */
-
-    del_len = end - start;
-    sima_memmove(vi_buffer + start, vi_buffer + end, vi_size - end);
-    vi_size -= del_len;
-    vi_modified = TRUE;
-    return TRUE;
-}
-
-/* Join current line with next line */
-static BOOL vi_join_with_next_line(void) {
-    UINT16 end = vi_get_line_end(vi_cursor);
-    UINT16 next;
-    UINT16 remove_len;
-
-    if (end >= vi_size || vi_buffer[end] != '\n') return FALSE;
-
-    next = end + 1;
-    while (next < vi_size && (vi_buffer[next] == ' ' || vi_buffer[next] == '\t')) {
-        next++;
-    }
-
-    if (next >= vi_size) {
-        sima_memmove(vi_buffer + end, vi_buffer + end + 1, vi_size - (end + 1));
-        vi_size--;
-        vi_modified = TRUE;
+    if (rc != PROGRAM_OK) {
+        print_program_result(rc);
         return TRUE;
     }
 
-    vi_buffer[end] = ' ';
-    remove_len = next - (end + 1);
-    if (remove_len > 0) {
-        sima_memmove(vi_buffer + end + 1, vi_buffer + next, vi_size - next);
-        vi_size -= remove_len;
+    g_loaded_handle = handle;
+
+    rc = program_loader_exec(handle, arg, &status);
+    if (rc != PROGRAM_OK) {
+        print_program_result(rc);
+        return TRUE;
     }
-    vi_modified = TRUE;
     return TRUE;
 }
 
-/* Paste yanked content */
-static BOOL vi_paste(void) {
-    UINT16 end;
-
-    if (vi_yank_len == 0) return FALSE;
-    if (vi_size + vi_yank_len > EDIT_MAX_SIZE) return FALSE;
-
-    /* Move to next line for line paste */
-    end = vi_get_line_end(vi_cursor);
-    if (end < vi_size && vi_buffer[end] == '\n') end++;
-    vi_cursor = end;
-
-    sima_memmove(vi_buffer + vi_cursor + vi_yank_len, vi_buffer + vi_cursor, vi_size - vi_cursor);
-    sima_memmove(vi_buffer + vi_cursor, vi_yank_buf, vi_yank_len);
-    vi_size += vi_yank_len;
-    vi_modified = TRUE;
-    return TRUE;
-}
-
-/* Move cursor left */
-static void vi_move_left(void) {
-    if (vi_cursor > 0) {
-        UINT16 line_start = vi_get_line_start(vi_cursor);
-        if (vi_cursor > line_start) {
-            vi_cursor--;
-        }
-    }
-}
-
-/* Move cursor right */
-static void vi_move_right(void) {
-    if (vi_cursor < vi_size) {
-        UINT16 line_end = vi_get_line_end(vi_cursor);
-        if (vi_cursor < line_end) {
-            vi_cursor++;
-        }
-    }
-}
-
-/* Move cursor up */
-static void vi_move_up(void) {
-    UINT16 cur_line = vi_pos_to_line(vi_cursor);
-    if (cur_line > 0) {
-        UINT16 target_col = vi_get_visual_col(vi_cursor);
-        UINT16 new_pos = vi_line_to_pos(cur_line - 1);
-        UINT16 new_end = vi_get_line_end(new_pos);
-
-        vi_cursor = vi_pos_at_visual_col(new_pos, target_col);
-        if (vi_mode == VI_MODE_NORMAL && new_pos < new_end && vi_cursor == new_end) {
-            vi_cursor = new_end - 1;
-        }
-    }
-}
-
-/* Move cursor down */
-static void vi_move_down(void) {
-    UINT16 cur_line = vi_pos_to_line(vi_cursor);
-    UINT16 total = vi_count_lines();
-    if (cur_line + 1 < total) {
-        UINT16 target_col = vi_get_visual_col(vi_cursor);
-        UINT16 new_pos = vi_line_to_pos(cur_line + 1);
-        UINT16 new_end = vi_get_line_end(new_pos);
-
-        vi_cursor = vi_pos_at_visual_col(new_pos, target_col);
-        if (vi_mode == VI_MODE_NORMAL && new_pos < new_end && vi_cursor == new_end) {
-            vi_cursor = new_end - 1;
-        }
-    }
-}
-
-/* Move to beginning of next word */
-static void vi_move_word_forward(void) {
-    UINT16 pos;
-
-    if (vi_size == 0) return;
-    pos = vi_cursor;
-    if (pos < vi_size) pos++;
-
-    while (pos < vi_size && !vi_is_word_char(vi_buffer[pos])) {
-        pos++;
-    }
-
-    if (pos < vi_size) {
-        vi_cursor = pos;
-    } else {
-        vi_cursor = vi_size - 1;
-    }
-}
-
-/* Move to beginning of previous word */
-static void vi_move_word_backward(void) {
-    UINT16 pos;
-
-    if (vi_size == 0 || vi_cursor == 0) return;
-    pos = vi_cursor - 1;
-
-    while (pos > 0 && !vi_is_word_char(vi_buffer[pos])) {
-        pos--;
-    }
-    while (pos > 0 && vi_is_word_char(vi_buffer[pos - 1])) {
-        pos--;
-    }
-    vi_cursor = pos;
-}
-
-/* Execute command */
-static BOOL vi_exec_cmd(const char *filename) {
-    /* Parse command */
-    if (vi_cmd_len == 0) return TRUE;
-    
-    if (vi_cmd_buf[0] == 'w' && (vi_cmd_len == 1 || (vi_cmd_len == 2 && vi_cmd_buf[1] == 'q'))) {
-        /* :w or :wq */
-        if (!fs_write(filename, (const UINT8*)vi_buffer, (UINT32)vi_size)) {
-            sima_strcpy(vi_status_msg, sizeof(vi_status_msg), "Write failed!");
-            return TRUE;
-        }
-        vi_modified = FALSE;
-        sima_strcpy(vi_status_msg, sizeof(vi_status_msg), "Written");
-        if (vi_cmd_len == 2) return FALSE; /* :wq - quit */
-    } else if (vi_cmd_buf[0] == 'q') {
-        if (vi_cmd_len == 1) {
-            if (vi_modified) {
-                sima_strcpy(vi_status_msg, sizeof(vi_status_msg), "No write since last change (add ! to override)");
-                return TRUE;
-            }
-            return FALSE; /* Quit */
-        } else if (vi_cmd_len == 2 && vi_cmd_buf[1] == '!') {
-            return FALSE; /* :q! - force quit */
-        }
-    } else if (vi_cmd_buf[0] == 'x') {
-        /* :x - save if modified, then quit */
-        if (vi_modified) {
-            if (!fs_write(filename, (const UINT8*)vi_buffer, (UINT32)vi_size)) {
-                sima_strcpy(vi_status_msg, sizeof(vi_status_msg), "Write failed!");
-                return TRUE;
-            }
-        }
-        return FALSE;
-    } else {
-        sima_strcpy(vi_status_msg, sizeof(vi_status_msg), "Unknown command");
-    }
-    
-    return TRUE;
-}
-
-/* Main editor function */
 static BOOL run_edit(const char *name) {
-    UINT32 read_size = 0;
-    BOOL running = TRUE;
-    
-    if (!name) return FALSE;
-    if (deny_if_forbidden(name, FALSE)) return TRUE;
-    
-    /* Initialize state */
-    vi_mode = VI_MODE_NORMAL;
-    vi_size = 0;
-    vi_cursor = 0;
-    vi_top_line = 0;
-    vi_cur_row = 0;
-    vi_cur_col = 0;
-    vi_cmd_len = 0;
-    vi_modified = FALSE;
-    vi_yank_len = 0;
-    vi_status_msg[0] = '\0';
-    sima_memclr(vi_buffer, sizeof(vi_buffer));
-    sima_memclr(vi_cmd_buf, sizeof(vi_cmd_buf));
-    sima_memclr(vi_yank_buf, sizeof(vi_yank_buf));
-    
-    /* Load file */
-    if (fs_read(name, (UINT8*)vi_buffer, EDIT_MAX_SIZE, &read_size)) {
-        vi_size = (UINT16)read_size;
-        sima_strcpy(vi_status_msg, sizeof(vi_status_msg), "File loaded");
-    } else {
-        sima_strcpy(vi_status_msg, sizeof(vi_status_msg), "New file");
+    const char *arg = (const char*)0;
+
+    if (name && name[0] != '\0') {
+        if (deny_if_forbidden(name, FALSE)) return TRUE;
+        arg = name;
     }
-    vi_buffer[vi_size] = '\0';
-    
-    /* Main loop */
-    while (running) {
-        UINT16 key;
-        char ch;
-
-        if (vi_cursor > vi_size) {
-            vi_cursor = vi_size;
-        }
-        if (vi_mode == VI_MODE_NORMAL && vi_size > 0 && vi_cursor == vi_size && vi_buffer[vi_size - 1] != '\n') {
-            vi_cursor = vi_size - 1;
-        }
-
-        vi_cursor_sync();
-        vi_render_screen();
-        vi_render_status(name);
-        set_cursor(vi_cur_row, vi_cur_col);
-
-        key = read_key();
-        ch = (char)(key & 0xFF);
-
-        switch (vi_mode) {
-            case VI_MODE_NORMAL:
-                if (ch == 'h' || key == KEY_LEFT) {
-                    vi_move_left();
-                } else if (ch == 'j' || key == KEY_DOWN) {
-                    vi_move_down();
-                } else if (ch == 'k' || key == KEY_UP) {
-                    vi_move_up();
-                } else if (ch == 'l' || key == KEY_RIGHT) {
-                    vi_move_right();
-                } else if (ch == 'w') {
-                    vi_move_word_forward();
-                } else if (ch == 'b') {
-                    vi_move_word_backward();
-                } else if (ch == 'i') {
-                    vi_mode = VI_MODE_INSERT;
-                } else if (ch == 'I') {
-                    vi_move_line_first_nonblank();
-                    vi_mode = VI_MODE_INSERT;
-                } else if (ch == 'a') {
-                    if (vi_cursor < vi_size && vi_buffer[vi_cursor] != '\n') {
-                        vi_cursor++;
-                    }
-                    vi_mode = VI_MODE_INSERT;
-                } else if (ch == 'A') {
-                    vi_cursor = vi_get_line_end(vi_cursor);
-                    vi_mode = VI_MODE_INSERT;
-                } else if (ch == 'o') {
-                    /* Open line below */
-                    UINT16 end = vi_get_line_end(vi_cursor);
-                    vi_cursor = end;
-                    vi_insert_char('\n');
-                    vi_mode = VI_MODE_INSERT;
-                } else if (ch == 'O') {
-                    /* Open line above */
-                    UINT16 start = vi_get_line_start(vi_cursor);
-                    vi_cursor = start;
-                    vi_insert_char('\n');
-                    vi_cursor = start;
-                    vi_mode = VI_MODE_INSERT;
-                } else if (ch == 'x' || key == KEY_DEL) {
-                    vi_delete_char();
-                } else if (ch == 'D') {
-                    vi_delete_to_eol();
-                } else if (ch == 'C') {
-                    vi_delete_to_eol();
-                    vi_mode = VI_MODE_INSERT;
-                } else if (ch == 'd') {
-                    /* Wait for second key */
-                    UINT16 key2 = read_key();
-                    char ch2 = (char)(key2 & 0xFF);
-                    if (ch2 == 'd') {
-                        vi_delete_line();
-                    }
-                } else if (ch == 'c') {
-                    UINT16 key2 = read_key();
-                    char ch2 = (char)(key2 & 0xFF);
-                    if (ch2 == 'c') {
-                        vi_change_line();
-                        vi_mode = VI_MODE_INSERT;
-                    }
-                } else if (ch == 'y') {
-                    /* Yank line */
-                    UINT16 key2 = read_key();
-                    char ch2 = (char)(key2 & 0xFF);
-                    if (ch2 == 'y') {
-                        UINT16 start = vi_get_line_start(vi_cursor);
-                        UINT16 end = vi_get_line_end(vi_cursor);
-                        if (end < vi_size && vi_buffer[end] == '\n') end++;
-                        vi_yank_len = end - start;
-                        if (vi_yank_len < sizeof(vi_yank_buf)) {
-                            sima_memmove(vi_yank_buf, vi_buffer + start, vi_yank_len);
-                        }
-                    }
-                } else if (ch == 'p') {
-                    vi_paste();
-                } else if (ch == 'J') {
-                    vi_join_with_next_line();
-                } else if (ch == 'r') {
-                    UINT16 key2 = read_key();
-                    char ch2 = (char)(key2 & 0xFF);
-                    if (ch2 >= 32 && ch2 < 127 && vi_cursor < vi_size && vi_buffer[vi_cursor] != '\n') {
-                        vi_buffer[vi_cursor] = ch2;
-                        vi_modified = TRUE;
-                    }
-                } else if (ch == 'G') {
-                    /* Go to end */
-                    if (vi_size > 0) vi_cursor = vi_size - 1;
-                } else if (ch == 'g') {
-                    UINT16 key2 = read_key();
-                    if ((key2 & 0xFF) == 'g') {
-                        vi_cursor = 0; /* Go to start */
-                    }
-                } else if (ch == '^') {
-                    vi_move_line_first_nonblank();
-                } else if (ch == '0' || key == KEY_HOME) {
-                    vi_cursor = vi_get_line_start(vi_cursor);
-                } else if (ch == '$' || key == KEY_END) {
-                    UINT16 end = vi_get_line_end(vi_cursor);
-                    if (end > vi_get_line_start(vi_cursor)) {
-                        vi_cursor = end - 1;
-                    }
-                } else if (ch == ':') {
-                    vi_mode = VI_MODE_COMMAND;
-                    vi_cmd_len = 0;
-                    sima_memclr(vi_cmd_buf, sizeof(vi_cmd_buf));
-                } else if (key == KEY_PGDN) {
-                    UINT16 i;
-                    for (i = 0; i < VI_ROWS - 1; i++) vi_move_down();
-                } else if (key == KEY_PGUP) {
-                    UINT16 i;
-                    for (i = 0; i < VI_ROWS - 1; i++) vi_move_up();
-                }
-                break;
-
-            case VI_MODE_INSERT:
-                if ((key & 0xFF) == KEY_ESC) {
-                    vi_mode = VI_MODE_NORMAL;
-                    if (vi_cursor > 0) {
-                        UINT16 ln_start = vi_get_line_start(vi_cursor);
-                        if (vi_cursor > ln_start) {
-                            vi_cursor--;
-                        } else if (vi_cursor == vi_size && vi_size > 0 && vi_buffer[vi_size - 1] != '\n') {
-                            vi_cursor--;
-                        }
-                    }
-                } else if (ch == KEY_BACKSP) {
-                    if (vi_cursor > 0) {
-                        vi_cursor--;
-                        vi_delete_char();
-                    }
-                } else if (key == KEY_LEFT) {
-                    vi_move_left();
-                } else if (key == KEY_RIGHT) {
-                    vi_move_right();
-                } else if (key == KEY_UP) {
-                    vi_move_up();
-                } else if (key == KEY_DOWN) {
-                    vi_move_down();
-                } else if (ch == KEY_ENTER) {
-                    vi_insert_char('\n');
-                } else if (ch >= 32 && ch < 127) {
-                    vi_insert_char(ch);
-                }
-                break;
-
-            case VI_MODE_COMMAND:
-                if ((key & 0xFF) == KEY_ESC) {
-                    vi_mode = VI_MODE_NORMAL;
-                    vi_cmd_len = 0;
-                } else if (ch == KEY_ENTER) {
-                    running = vi_exec_cmd(name);
-                    vi_mode = VI_MODE_NORMAL;
-                    vi_cmd_len = 0;
-                } else if (ch == KEY_BACKSP) {
-                    if (vi_cmd_len > 0) {
-                        vi_cmd_len--;
-                        vi_cmd_buf[vi_cmd_len] = '\0';
-                    } else {
-                        vi_mode = VI_MODE_NORMAL;
-                    }
-                } else if (ch >= 32 && ch < 127 && vi_cmd_len < sizeof(vi_cmd_buf) - 1) {
-                    vi_cmd_buf[vi_cmd_len++] = ch;
-                    vi_cmd_buf[vi_cmd_len] = '\0';
-                }
-                break;
-        }
-    }
-    
-    clear_screen();
-    return TRUE;
+    return run_builtin_program("BIN/EDIT.XEF", "EDIT.XEF", arg);
 }
-
 
 static BOOL run_rm(const char *name) {
     if (!name) return FALSE;
@@ -1431,15 +820,27 @@ static BOOL run_mkdir(const char *name) {
     return TRUE;
 }
 
+static PROGRAM_RESULT prepare_loaded_program(const char *name, PROGRAM_HANDLE *out_handle) {
+    PROGRAM_RESULT rc;
+    PROGRAM_HANDLE handle = PROGRAM_HANDLE_INVALID;
+
+    if (!name || name[0] == '\0') return PROGRAM_ERR_INVALID_ARG;
+    rc = load_program_with_path(name, &handle);
+    if (rc != PROGRAM_OK) return rc;
+    g_loaded_handle = handle;
+    if (out_handle) *out_handle = handle;
+    return PROGRAM_OK;
+}
+
 static BOOL run_load(const char *name) {
+    PROGRAM_RESULT rc;
+
     if (!name) return FALSE;
     if (!perm_is_root() && has_path_separator(name) && deny_if_forbidden(name, TRUE)) return TRUE;
-    if (!perm_check(name, PERM_OP_READ | PERM_OP_EXEC)) {
-        print_simple("Permission denied.");
-        return TRUE;
-    }
-    if (!load_program_with_path(name)) {
-        print_simple("Unable to load program.");
+
+    rc = prepare_loaded_program(name, (PROGRAM_HANDLE*)0);
+    if (rc != PROGRAM_OK) {
+        print_program_result(rc);
         return TRUE;
     }
     print_simple("Program loaded.");
@@ -1447,26 +848,46 @@ static BOOL run_load(const char *name) {
 }
 
 static BOOL run_program(void) {
-    if (!program_run()) {
+    PROGRAM_RESULT rc;
+    UINT16 status = 1;
+
+    if (g_loaded_handle == PROGRAM_HANDLE_INVALID) {
         print_simple("No program loaded.");
         return TRUE;
     }
+
+    rc = program_loader_exec(g_loaded_handle,
+                             (const char*)0,
+                             &status);
+    if (rc == PROGRAM_ERR_BAD_HANDLE) {
+        g_loaded_handle = PROGRAM_HANDLE_INVALID;
+        print_simple("No program loaded.");
+        return TRUE;
+    }
+    if (rc != PROGRAM_OK) {
+        print_program_result(rc);
+        return TRUE;
+    }
+
     return TRUE;
 }
 
 static BOOL run_exec(const char *name) {
+    PROGRAM_RESULT rc;
+    PROGRAM_HANDLE handle = PROGRAM_HANDLE_INVALID;
+    UINT16 status = 1;
+
     if (!name) return FALSE;
     if (!perm_is_root() && has_path_separator(name) && deny_if_forbidden(name, TRUE)) return TRUE;
-    if (!perm_check(name, PERM_OP_READ | PERM_OP_EXEC)) {
-        print_simple("Permission denied.");
+
+    rc = prepare_loaded_program(name, &handle);
+    if (rc != PROGRAM_OK) {
+        print_program_result(rc);
         return TRUE;
     }
-    if (!load_program_with_path(name)) {
-        print_simple("Unable to load program.");
-        return TRUE;
-    }
-    if (!program_run()) {
-        print_simple("Program failed to run.");
+    rc = program_loader_exec(handle, (const char*)0, &status);
+    if (rc != PROGRAM_OK) {
+        print_program_result(rc);
         return TRUE;
     }
     return TRUE;
@@ -1481,36 +902,12 @@ static BOOL run_sync(void) {
     return TRUE;
 }
 
-static BOOL run_fault(const char *kind) {
-    if (!kind || kind[0] == '\0' || man_topic_eq(kind, "HELP")) {
-        print_message("Usage: fault <kind>");
-        print_message("Kinds: de/div0, bp/int3, ud/invalid, gp, of/overflow");
-        return TRUE;
-    }
+static BOOL run_calc(void) {
+    return run_builtin_program("BIN/CALC.XEF", "CALC.XEF", (const char*)0);
+}
 
-    if (man_topic_eq(kind, "DE") || man_topic_eq(kind, "DIV0")) {
-        debug_trigger_div0();
-        return TRUE;
-    }
-    if (man_topic_eq(kind, "BP") || man_topic_eq(kind, "INT3")) {
-        debug_trigger_bp();
-        return TRUE;
-    }
-    if (man_topic_eq(kind, "UD") || man_topic_eq(kind, "INVALID")) {
-        debug_trigger_ud();
-        return TRUE;
-    }
-    if (man_topic_eq(kind, "GP")) {
-        debug_trigger_gp();
-        return TRUE;
-    }
-    if (man_topic_eq(kind, "OF") || man_topic_eq(kind, "OVERFLOW")) {
-        debug_trigger_of();
-        return TRUE;
-    }
-
-    print_simple("Unknown kind. Try: fault help");
-    return TRUE;
+static BOOL run_hello(void) {
+    return run_builtin_program("BIN/HELLO.XEF", "HELLO.XEF", (const char*)0);
 }
 
 static BOOL run_whoami(void) {
@@ -1630,11 +1027,14 @@ BOOL run_buffer(char *buffer)
 {
     UINT16 argc;
     char *argv[16];
-	char temp[256];
     if (!buffer || buffer[0] == '\0') return FALSE;
 
-	sima_strcpy(temp,sizeof(temp),buffer);
-    argc = parse_argv(temp, argv, (UINT16)16);
+    /* wait_prompt INPUT_MAX is 64, so argv_buffer is sufficient and avoids
+     * a large temporary stack buffer.
+     */
+    sima_memclr(argv_buffer, (UINT16)sizeof(argv_buffer));
+    (void)sima_strcpy(argv_buffer, (UINT16)sizeof(argv_buffer), buffer);
+    argc = parse_argv(argv_buffer, argv, (UINT16)16);
     if (argc == 0 || !argv[0] || argv[0][0] == '\0') return FALSE;
 	
     /* argv[0] 가 명령어 */
@@ -1651,13 +1051,30 @@ BOOL run_buffer(char *buffer)
             return TRUE;
         }
         if (argc == 2) {
-            return run_man(argv[1]);
+            sima_memclr(message_buffer, (UINT16)sizeof(message_buffer));
+            sima_strcpy(message_buffer, (UINT16)sizeof(message_buffer), "Use: man ");
+            sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), argv[1]);
+            print_message(message_buffer);
+            return TRUE;
         }
         return wrong_command_usage(buffer);
     }
     if (sima_strcmp(argv[0], "man") == STRC_SAME) {
         if (argc == 1) return run_man((const char*)0);
-        if (argc == 2) return run_man(argv[1]);
+        if (argc == 2) {
+            if (sima_strcmp(argv[1], "-h") == STRC_SAME || sima_strcmp(argv[1], "--help") == STRC_SAME) {
+                return run_man((const char*)0);
+            }
+            if (sima_strcmp(argv[1], "-k") == STRC_SAME || sima_strcmp(argv[1], "-f") == STRC_SAME) {
+                return wrong_command_usage(buffer);
+            }
+            return run_man(argv[1]);
+        }
+        if (argc == 3) {
+            if (sima_strcmp(argv[1], "-k") == STRC_SAME) return run_man_apropos(argv[2]);
+            if (sima_strcmp(argv[1], "-f") == STRC_SAME) return run_man_whatis(argv[2]);
+            return run_man_with_section(argv[1], argv[2]);
+        }
         return wrong_command_usage(buffer);
     }
     if (sima_strcmp(argv[0], "cls") == STRC_SAME && argc == 1) {
@@ -1680,19 +1097,25 @@ BOOL run_buffer(char *buffer)
         return run_cat(argv[1]);
     }
     if (sima_strcmp(argv[0], "write") == STRC_SAME && argc >= 3) {
-        char data_buf[256];
+        BOOL ok = TRUE;
         UINT16 i;
-        sima_memclr(data_buf, (UINT16)sizeof(data_buf));
+        sima_memclr(message_buffer, (UINT16)sizeof(message_buffer));
         for (i = 2; i < argc; ++i) {
             if (i != 2) {
-                sima_strcat(data_buf, (UINT16)sizeof(data_buf), " ");
+                ok = ok && sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), " ");
             }
-            sima_strcat(data_buf, (UINT16)sizeof(data_buf), argv[i]);
+            ok = ok && sima_strcat(message_buffer, (UINT16)sizeof(message_buffer), argv[i]);
         }
-        return run_write(argv[1], data_buf);
+        if (!ok) {
+            print_simple("Write data too long.");
+            return TRUE;
+        }
+        return run_write(argv[1], message_buffer);
     }
-    if (sima_strcmp(argv[0], "edit") == STRC_SAME && argc == 2) {
-        return run_edit(argv[1]);
+    if (sima_strcmp(argv[0], "edit") == STRC_SAME) {
+        if (argc == 1) return run_edit((const char*)0);
+        if (argc == 2) return run_edit(argv[1]);
+        return wrong_command_usage(buffer);
     }
     if (sima_strcmp(argv[0], "rm") == STRC_SAME && argc == 2) {
         return run_rm(argv[1]);
@@ -1718,10 +1141,11 @@ BOOL run_buffer(char *buffer)
     if (sima_strcmp(argv[0], "diskinfo") == STRC_SAME && argc == 1) {
         return run_diskinfo();
     }
-    if (sima_strcmp(argv[0], "fault") == STRC_SAME) {
-        if (argc == 1) return run_fault((const char*)0);
-        if (argc == 2) return run_fault(argv[1]);
-        return wrong_command_usage(buffer);
+    if (sima_strcmp(argv[0], "calc") == STRC_SAME && argc == 1) {
+        return run_calc();
+    }
+    if (sima_strcmp(argv[0], "hello") == STRC_SAME && argc == 1) {
+        return run_hello();
     }
     if (sima_strcmp(argv[0], "whoami") == STRC_SAME && argc == 1) {
         return run_whoami();
@@ -1760,7 +1184,8 @@ BOOL run_buffer(char *buffer)
         sima_strcmp(argv[0], "exec") == STRC_SAME ||
         sima_strcmp(argv[0], "sync") == STRC_SAME ||
         sima_strcmp(argv[0], "diskinfo") == STRC_SAME ||
-        sima_strcmp(argv[0], "fault") == STRC_SAME ||
+        sima_strcmp(argv[0], "calc") == STRC_SAME ||
+        sima_strcmp(argv[0], "hello") == STRC_SAME ||
         sima_strcmp(argv[0], "whoami") == STRC_SAME ||
         sima_strcmp(argv[0], "users") == STRC_SAME ||
         sima_strcmp(argv[0], "useradd") == STRC_SAME ||

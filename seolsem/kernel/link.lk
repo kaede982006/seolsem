@@ -21,6 +21,10 @@ file build/obj/sima_conv.obj
 file build/obj/sima_ide.obj
 file build/obj/sima_fs.obj
 file build/obj/sima_program.obj
+file build/obj/sima_proc.obj
+file build/obj/sima_syscall.obj
+file build/obj/xef_loader.obj
+file build/obj/xef_exec.obj
 file build/obj/sima_env.obj
 file build/obj/sima_user.obj
 file build/obj/sima_perm.obj

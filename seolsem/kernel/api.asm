@@ -43,15 +43,12 @@ global _wait_prompt_masked
 global _read_key
 global _set_cursor
 global _write_char
+global _cursor_show
+global _cursor_hide
 global _sync_ds
 global _enable_irq
 global _disable_irq
 global _kbd_isr
-global _debug_trigger_div0
-global _debug_trigger_ud
-global _debug_trigger_gp
-global _debug_trigger_bp
-global _debug_trigger_of
 
 ; ------------------------------------------------------------
 ; Screen
@@ -92,12 +89,20 @@ _write_char:
     mov  bp, sp
     push ax
     push bx
+    push di
     push es
 
     mov  ax, PM_VIDEO_SEL
     mov  es, ax
 
+    ; Bounds check: callers must not write outside 80x25.
     mov  ax, [bp+4]         ; row
+    cmp  ax, 25
+    jae  .done
+    mov  bx, [bp+6]         ; col
+    cmp  bx, 80
+    jae  .done
+
     mov  bx, 160
     mul  bx                 ; AX = row * 160
     mov  bx, [bp+6]         ; col
@@ -108,11 +113,21 @@ _write_char:
     mov  al, [bp+8]         ; ch
     mov  ah, [bp+10]        ; attr
     mov  [es:di], ax
+.done:
 
     pop  es
+    pop  di
     pop  bx
     pop  ax
     pop  bp
+    ret
+
+_cursor_show:
+    call show_cursor_hw
+    ret
+
+_cursor_hide:
+    call hide_cursor_hw
     ret
 
 ; ------------------------------------------------------------
@@ -129,35 +144,6 @@ _enable_irq:
 
 _disable_irq:
     cli
-    ret
-
-; ------------------------------------------------------------
-; Exception debug triggers
-; ------------------------------------------------------------
-_debug_trigger_div0:
-    xor  dx, dx
-    mov  ax, 1
-    xor  cx, cx
-    div  cx
-    ret
-
-_debug_trigger_ud:
-    db 0x0F, 0x0B     ; UD2
-    ret
-
-_debug_trigger_gp:
-    mov  ax, 0x1234
-    mov  ds, ax
-    ret
-
-_debug_trigger_bp:
-    int3
-    ret
-
-_debug_trigger_of:
-    mov  ax, 0x7FFF
-    add  ax, 1
-    into
     ret
 
 ; ------------------------------------------------------------

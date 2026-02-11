@@ -1,9 +1,9 @@
 ; Seolsem installer stage2
 ; - Ask confirmation (Y/N) and require typing "YES"
-; - Read the Seolsem system disk from A: (swapped) or B: (optional second floppy)
+; - Read Seolsem kernel disk first, then program disk (swapped media)
 ; - Partition HDD with MBR + single FAT32 partition at LBA 2048
 ; - Format partition as FAT32
-; - Copy KERNEL.BIN, XENV.ENV, and BIN/* into the new FAT32 volume
+; - Copy KERNEL.BIN (disk #1), then BIN/* (disk #2)
 ; - Halt on completion
 
 [org 0x00]
@@ -22,7 +22,7 @@ section .text
 %define SECTOR_SIZE     512
 
 %define INSTALL_DRIVE   0x00         ; A: (installer boot drive)
-%define SRC_DRIVE_B     0x01         ; B: (optional second floppy for Seolsem disk)
+%define SRC_DRIVE_B     0x01         ; optional second floppy source
 %define DST_DRIVE       0x80         ; First HDD
 
 %define PART_START_LBA  2048
@@ -35,6 +35,9 @@ section .text
 %define ROOT_CLUSTER    2
 %define SRC_BOOT_MAGIC_OFS 0x01F0
 %define SRC_BOOT_MAGIC_LEN 8
+%define SRC_DISK_ROLE_OFS 0x01F8
+%define SRC_DISK_ROLE_KERNEL 0x01
+%define SRC_DISK_ROLE_PROGRAM 0x02
 
 jmp STAGE2_SEG:start
 
@@ -110,16 +113,17 @@ start:
     ; ---- Source disk detection ----
     mov si, ui_log_src_try_b
     call ui_log_push
-    ; Two-floppy setup: if B: already has the Seolsem system disk, skip swap prompt.
+    mov byte [src_expected_role], SRC_DISK_ROLE_KERNEL
+    ; Two-floppy setup: if the secondary floppy already has the Seolsem system disk, skip swap prompt.
     mov byte [src_drive], SRC_DRIVE_B
     call try_prepare_source_disk
     jnc .src_ready
 
-    ; One-floppy setup: try up to 4 additional attempts on A: (total tries = 5).
-    mov byte [src_retry_left], 4
+    ; One-floppy setup: up to 5 swap attempts on A:.
+    mov byte [src_retry_left], 5
 .retry_src:
     ; Only show retry/swap log messages after the first attempt.
-    cmp byte [src_retry_left], 4
+    cmp byte [src_retry_left], 5
     je  .skip_retry_msg
     mov si, ui_log_src_retry
     call ui_log_push
@@ -330,7 +334,7 @@ start:
 
     mov si, ui_log_done
     call ui_log_push
-    jmp halt_forever
+    jmp reboot_hdd_after_key
 
 .cancel:
     push cs
@@ -425,6 +429,31 @@ halt_forever:
     call ui_progress
     call read_key   ; Poll with marquee animation
     int 0x19        ; Warm boot
+    jmp $
+
+reboot_hdd_after_key:
+    push cs
+    pop ds
+    mov si, ui_status_reboot
+    call ui_status
+    mov al, 100
+    call ui_progress
+    call read_key
+
+    ; Chainload HDD MBR directly so reboot always continues from disk 0x80.
+    xor ax, ax
+    mov es, ax
+    mov bx, 0x7C00
+    xor dx, dx
+    xor ax, ax
+    mov si, DST_DRIVE
+    call read_sector_lba32
+    jc .fallback_int19
+    mov dl, DST_DRIVE
+    jmp 0x0000:0x7C00
+
+.fallback_int19:
+    int 0x19
     jmp $
 
 
@@ -1974,10 +2003,39 @@ try_prepare_source_disk:
     jc .fail
     call verify_source_boot_signature
     jc .fail
+    call verify_source_disk_role
+    jc .fail
     clc
     ret
 .fail:
     stc
+    ret
+
+; Validate source disk role marker byte in boot sector.
+; Expected role bit is in [src_expected_role].
+; Accept if (role_byte & expected_role) != 0.
+verify_source_disk_role:
+    push ax
+    push bx
+    push es
+
+    mov ax, BUF_SEG
+    mov es, ax
+    mov al, [src_expected_role]
+    test al, al
+    jz .fail
+    mov bl, [es:SRC_DISK_ROLE_OFS]
+    test bl, al
+    jz .fail
+
+    clc
+    jmp .ret
+.fail:
+    stc
+.ret:
+    pop es
+    pop bx
+    pop ax
     ret
 
 ; Validate source boot sector signature.
@@ -2876,13 +2934,13 @@ copy_used_clusters:
 
 ; Install Seolsem filesystem into the formatted destination partition.
 ; - Rebuild destination FAT/root/bin for the chosen dst_sec_per_clus.
-; - Copy KERNEL.BIN, XENV.ENV and BIN/* from the swapped source floppy.
+; - Copy KERNEL.BIN from kernel disk, then BIN/* from program disk.
 ; CF=1 on failure.
 ; (install_fs removed - unused FAT12 logic)
 
-; Validate source floppy/root contents before destructive HDD writes.
+; Validate kernel source floppy/root contents before destructive HDD writes.
 ; Requires source BPB/layout fields to be parsed.
-; CF=0 when KERNEL.BIN, XENV.ENV and BIN directory exist.
+; CF=0 when KERNEL.BIN exists and is a regular file.
 verify_source_seolsem_image:
     push ax
     push bx
@@ -2923,20 +2981,6 @@ verify_source_seolsem_image:
     test al, 0x10
     jnz .fail
 
-    mov si, name_env11
-    call find_root_entry
-    jc .fail
-    mov al, [es:di+11]
-    test al, 0x10
-    jnz .fail
-
-    mov si, name_bin11
-    call find_root_entry
-    jc .fail
-    mov al, [es:di+11]
-    test al, 0x10
-    jz .fail
-
     clc
     jmp .ret
 
@@ -2949,6 +2993,36 @@ verify_source_seolsem_image:
     pop dx
     pop cx
     pop bx
+    pop ax
+    ret
+
+; Validate program entries in currently loaded source root directory.
+; Requires SRC_ROOT_SEG to contain root directory sectors.
+; CF=0 when BIN exists (directory).
+verify_program_files_in_loaded_root:
+    push ax
+    push si
+    push ds
+    push es
+
+    push cs
+    pop ds
+
+    mov si, name_bin11
+    call find_root_entry
+    jc .fail
+    mov al, [es:di+11]
+    test al, 0x10
+    jz .fail
+
+    clc
+    jmp .ret
+.fail:
+    stc
+.ret:
+    pop es
+    pop ds
+    pop si
     pop ax
     ret
 
@@ -3845,6 +3919,7 @@ ui_cur_step  db 0
 
 ; BIOS geometry
 src_drive db INSTALL_DRIVE
+src_expected_role db 0
 src_retry_left db 0
 src_spt   dw 0
 src_heads dw 0
@@ -4420,8 +4495,8 @@ install_fs_fat32:
     ; Next free cluster starts after root cluster (2)
     mov word [dst_next_cluster], 3
 
-    ; ---- Find required files on source disk (FAT12 root) ----
-    mov si, ui_log_find_files
+    ; ---- Find/copy KERNEL.BIN from source disk #1 (kernel disk) ----
+    mov si, ui_log_find_kernel
     call ui_log_push
     mov si, name_kernel11
     call find_root_entry
@@ -4432,32 +4507,6 @@ install_fs_fat32:
     mov [src_kernel_size_lo], ax
     mov ax, [es:di+30]
     mov [src_kernel_size_hi], ax
-
-    mov si, name_env11
-    call find_root_entry
-    jc .missing_env
-    mov ax, [es:di+26]
-    mov [src_env_cluster], ax
-    mov ax, [es:di+28]
-    mov [src_env_size_lo], ax
-    mov ax, [es:di+30]
-    mov [src_env_size_hi], ax
-
-    mov si, name_bin11
-    call find_root_entry
-    jc .missing_bin
-    mov ax, [es:di+26]
-    mov [src_bin_cluster], ax
-
-    call parse_src_bin_dir
-    jc .fail
-
-    ; ---- Allocate BIN directory cluster (one cluster is enough for up to 64 entries) ----
-    mov ax, 1
-    call fat32_alloc_chain
-    jc .fail
-    mov [dst_bin_cluster], ax
-    mov word [dst_bin_clusters], 1
 
     ; ---- Allocate/copy KERNEL.BIN ----
     mov ax, [src_kernel_size_lo]
@@ -4481,27 +4530,100 @@ install_fs_fat32:
     mov al, 65
     call ui_progress
 
-    ; ---- Allocate/copy XENV.ENV ----
-    mov ax, [src_env_size_lo]
-    mov dx, [src_env_size_hi]
-    call bytes_to_clusters_ceil
+    ; ---- Prepare source disk #2 (program disk: BIN/*) ----
+    mov byte [src_expected_role], SRC_DISK_ROLE_PROGRAM
+    mov byte [src_retry_left], 5
+.program_swap_retry:
+    cmp byte [src_retry_left], 5
+    je  .skip_retry_log
+    mov si, ui_log_src_retry
+    call ui_log_push
+.skip_retry_log:
+    mov si, ui_log_swap_program
+    call ui_log_push
+    mov si, ui_status_swap_program
+    call ui_status
+    mov al, 68
+    call ui_progress
+    call read_key
+
+    ; Reset current source drive after media swap.
+    push ds
+    xor ax, ax
+    mov dl, [src_drive]
+    int 0x13
+    pop ds
+
+    call try_prepare_source_disk
+    jc .program_swap_fail
+
+    mov dl, [src_drive]
+    call get_geometry
+    jc .program_swap_fail
+    mov [src_spt], ax
+    mov [src_heads], bx
+    mov [src_cyls], cx
+
+    mov ax, BUF_SEG
+    mov es, ax
+    call parse_src_bpb
+    jc .program_swap_fail
+    call calc_src_layout
+    jc .program_swap_fail
+
+    ; Reload source FAT and root directory from the program disk.
+    mov ax, SRC_FAT_SEG
+    mov es, ax
+    xor bx, bx
+    xor ax, ax
+    mov al, [src_drive]
+    mov si, ax
+    xor dx, dx
+    mov ax, [src_fat_start_lba]
+    mov cx, [src_fat_secs]
+    call read_sectors_lba32
+    jc .program_swap_fail
+
+    mov ax, SRC_ROOT_SEG
+    mov es, ax
+    xor bx, bx
+    xor ax, ax
+    mov al, [src_drive]
+    mov si, ax
+    xor dx, dx
+    mov ax, [src_root_start_lba]
+    mov cx, [src_root_dir_sectors]
+    call read_sectors_lba32
+    jc .program_swap_fail
+
+    call verify_program_files_in_loaded_root
+    jnc .program_source_ready
+
+.program_swap_fail:
+    dec byte [src_retry_left]
+    jnz .program_swap_retry
+    jmp .missing_program_disk
+
+.program_source_ready:
+    ; ---- Find/copy program files from source disk #2 ----
+    mov si, ui_log_find_programs
+    call ui_log_push
+
+    mov si, name_bin11
+    call find_root_entry
+    jc .missing_bin
+    mov ax, [es:di+26]
+    mov [src_bin_cluster], ax
+
+    call parse_src_bin_dir
     jc .fail
-    mov [dst_env_clusters], ax
+
+    ; ---- Allocate BIN directory cluster (one cluster is enough for up to 64 entries) ----
+    mov ax, 1
     call fat32_alloc_chain
     jc .fail
-    mov [dst_env_cluster], ax
-
-    mov si, ui_log_copy_env
-    call ui_log_push
-    mov cx, [src_env_cluster]
-    mov dx, [src_env_size_lo]
-    mov si, [src_env_size_hi]
-    mov ax, [dst_env_cluster]
-    mov bx, [dst_env_clusters]
-    call copy_file_to_dst
-    jc .fail
-    mov al, 70
-    call ui_progress
+    mov [dst_bin_cluster], ax
+    mov word [dst_bin_clusters], 1
 
     ; ---- Allocate/copy BIN/* files ----
     mov si, ui_log_copy_bin
@@ -4590,13 +4712,13 @@ install_fs_fat32:
     call ui_log_push
     stc
     jmp .ret
-.missing_env:
-    mov si, msg_missing_env
+.missing_bin:
+    mov si, msg_missing_bin
     call ui_log_push
     stc
     jmp .ret
-.missing_bin:
-    mov si, msg_missing_bin
+.missing_program_disk:
+    mov si, msg_missing_program_disk
     call ui_log_push
     stc
     jmp .ret
@@ -5507,49 +5629,35 @@ write_root_dir_cluster_fat32:
     mov ax, [src_kernel_size_hi]
     mov word [es:0+30], ax
 
-    ; Entry 1: XENV.ENV
+    ; Entry 1: BIN (directory)
     mov di, 32
-    mov si, name_env11
+    mov si, name_bin11
     mov cx, 11
     rep movsb
-    mov byte [es:32+11], 0x20
+    mov byte [es:32+11], 0x10
     mov word [es:32+20], 0
-    mov ax, [dst_env_cluster]
+    mov ax, [dst_bin_cluster]
     mov word [es:32+26], ax
-    mov ax, [src_env_size_lo]
-    mov word [es:32+28], ax
-    mov ax, [src_env_size_hi]
-    mov word [es:32+30], ax
 
-    ; Entry 2: BIN (directory)
+    ; Entry 2: ETC (directory)
     mov di, 64
-    mov si, name_bin11
+    mov si, name_etc11
     mov cx, 11
     rep movsb
     mov byte [es:64+11], 0x10
     mov word [es:64+20], 0
-    mov ax, [dst_bin_cluster]
+    mov ax, [dst_etc_cluster]
     mov word [es:64+26], ax
 
-    ; Entry 3: ETC (directory)
+    ; Entry 3: HOME (directory)
     mov di, 96
-    mov si, name_etc11
+    mov si, name_home11
     mov cx, 11
     rep movsb
     mov byte [es:96+11], 0x10
     mov word [es:96+20], 0
-    mov ax, [dst_etc_cluster]
-    mov word [es:96+26], ax
-
-    ; Entry 4: HOME (directory)
-    mov di, 128
-    mov si, name_home11
-    mov cx, 11
-    rep movsb
-    mov byte [es:128+11], 0x10
-    mov word [es:128+20], 0
     mov ax, [dst_home_cluster]
-    mov word [es:128+26], ax
+    mov word [es:96+26], ax
 
     ; Write first sector of root cluster (rest is already zeroed by init_root_cluster)
     mov ax, BUF_SEG
@@ -5593,7 +5701,8 @@ ui_status_type_yes    db 'Type YES to confirm',0
 ui_status_bad_yes     db 'Confirmation failed',0
 ui_status_root_pw     db 'Root password setup',0
 ui_status_users       db 'User setup (optional)',0
-ui_status_swap        db 'Swap to Seolsem disk and press any key',0
+ui_status_swap        db 'Swap to kernel disk and press any key',0
+ui_status_swap_program db 'Swap to program disk and press any key',0
 ui_status_detect      db 'Detecting disks...',0
 ui_status_partition   db 'Partitioning HDD...',0
 ui_status_format      db 'Formatting FAT32...',0
@@ -5616,9 +5725,10 @@ ui_log_cancel         db 'Installation cancelled.',0
 ui_log_start          db 'Starting installation...',0
 ui_log_hdd_geom       db 'Detect HDD geometry',0
 ui_log_hdd_size       db 'Detect HDD size',0
-ui_log_src_try_b      db 'Checking system disk in drive B:',0
+ui_log_src_try_b      db 'Checking system floppy disk:',0
 ui_log_src_retry      db 'Source disk not valid, retrying...',0
-ui_log_swap           db 'Swap to system disk now.',0
+ui_log_swap           db 'Swap to kernel disk now.',0
+ui_log_swap_program   db 'Swap to program disk now.',0
 ui_log_src_geom       db 'Detect source geometry',0
 ui_log_parse_bpb      db 'Parse source BPB',0
 ui_log_calc_src       db 'Compute source layout',0
@@ -5634,9 +5744,9 @@ ui_log_load_src       db 'Load source FAT/root',0
 ui_log_install        db 'Copy files',0
 ui_log_done           db 'Success. Reboot now.',0
 
-ui_log_find_files     db 'Find required files',0
+ui_log_find_kernel    db 'Find KERNEL.BIN',0
+ui_log_find_programs  db 'Find BIN directory',0
 ui_log_copy_kernel    db 'Copy KERNEL.BIN',0
-ui_log_copy_env       db 'Copy XENV.ENV',0
 ui_log_copy_bin       db 'Copy BIN/*',0
 ui_log_create_users   db 'Create /ETC/PASSWD and /HOME',0
 ui_log_finalize       db 'Write root directory',0
@@ -5686,8 +5796,8 @@ msg_disk_detail  db ' op/drive/lba/ah: ',0
 msg_bad_bpb      db 'Bad Source BPB!',0
 msg_layout_fail  db 'Layout Calc Fail!',0
 msg_missing_kernel db 'Missing KERNEL.BIN on source disk.',13,10,0
-msg_missing_env    db 'Missing XENV.ENV on source disk.',13,10,0
 msg_missing_bin    db 'Missing BIN directory on source disk.',13,10,0
+msg_missing_program_disk db 'Program disk is missing required files.',13,10,0
 msg_install_fail db 'Install failed.',13,10,0
 
 ; FAT32 specific variables (moved to end)

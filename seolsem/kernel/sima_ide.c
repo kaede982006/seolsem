@@ -74,8 +74,8 @@ BOOL ide_write_sector(UINT32 lba, const UINT8 *buffer) {
     if (!ide_wait_drq()) return FALSE;
     io_outsw(IDE_DATA, buffer, 256);
 
-    if (io_inb(IDE_STATUS) & IDE_STATUS_ERR) return FALSE;
-    return TRUE;
+    /* Wait for command completion so errors are latched before we report success. */
+    return ide_wait_ready();
 }
 
 BOOL ide_identify_total_sectors(UINT32 *out_total_sectors) {

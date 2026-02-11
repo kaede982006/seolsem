@@ -5,7 +5,7 @@
 
 #define USER_MAX 8
 #define USER_NAME_MAX 9   /* 8.3 base name length + NUL */
-#define USER_HOME_MAX 128 /* keep in sync with FS_PATH_MAX */
+#define USER_HOME_MAX 64  /* user home path (prompt/display) */
 #define USER_PASS_MAX 9   /* installer/useradd default: 1..8 chars + NUL */
 
 typedef struct {

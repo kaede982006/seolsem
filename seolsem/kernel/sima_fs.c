@@ -703,6 +703,7 @@ static void fat_format_name(const FAT_DIR_RAW *raw, char *out, UINT16 out_cap) {
 /* Forward declarations (used by write/path helpers before definitions). */
 static BOOL fat_find_in_dir(UINT32 dir_cluster, const char *name, FAT_DIR_RAW *out_raw);
 static UINT32 fat_entry_cluster(const FAT_DIR_RAW *raw);
+static BOOL fat_is_exec_entry(const FAT_DIR_RAW *raw);
 static BOOL fat_parent_cluster(UINT32 cluster, UINT32 *out_parent);
 static const char *fat_skip_separators(const char *cursor);
 static BOOL fat_next_segment(const char **path_cursor, char *segment, UINT16 segment_cap);
@@ -1340,6 +1341,20 @@ static BOOL fat_resolve_path(const char *path, FAT_DIR_RAW *out_raw) {
     return FALSE;
 }
 
+static BOOL fat_fill_dirent(const FAT_DIR_RAW *raw, FS_DIRENT *out) {
+    if (!raw || !out) return FALSE;
+    sima_memclr((void*)out, (UINT16)sizeof(FS_DIRENT));
+    fat_format_name(raw, out->name, FS_NAME_MAX);
+    out->size = le32(raw->size);
+    out->first_cluster = fat_entry_cluster(raw);
+    out->is_dir = (raw->attr & FAT_ATTR_DIRECTORY) ? TRUE : FALSE;
+    out->is_volume = (raw->attr & FAT_ATTR_VOLUME) ? TRUE : FALSE;
+    out->is_hidden = (raw->attr & FAT_ATTR_HIDDEN) ? TRUE : FALSE;
+    out->is_system = (raw->attr & FAT_ATTR_SYSTEM) ? TRUE : FALSE;
+    out->is_exec = fat_is_exec_entry(raw);
+    return TRUE;
+}
+
 static BOOL fat_resolve_dir(const char *path, UINT32 *out_cluster) {
     const char *cursor;
     UINT32 current_cluster;
@@ -1396,9 +1411,9 @@ static BOOL fat_resolve_dir(const char *path, UINT32 *out_cluster) {
 
 static BOOL fat_is_exec_entry(const FAT_DIR_RAW *raw) {
     if (!raw) return FALSE;
-    if (to_upper(raw->ext[0]) != 'P') return FALSE;
-    if (to_upper(raw->ext[1]) != 'R') return FALSE;
-    if (to_upper(raw->ext[2]) != 'G') return FALSE;
+    if (to_upper(raw->ext[0]) != 'X') return FALSE;
+    if (to_upper(raw->ext[1]) != 'E') return FALSE;
+    if (to_upper(raw->ext[2]) != 'F') return FALSE;
     return TRUE;
 }
 
@@ -1564,17 +1579,7 @@ BOOL fs_dir_read(FS_DIR *dir, FS_DIRENT *out) {
     FAT_DIR_RAW raw;
     if (!fs_is_ready()) return FALSE;
     if (!fat_dir_read_raw(dir, &raw)) return FALSE;
-
-    fat_format_name(&raw, out->name, FS_NAME_MAX);
-    out->size = le32(raw.size);
-    out->first_cluster = fat_entry_cluster(&raw);
-    out->is_dir = (raw.attr & FAT_ATTR_DIRECTORY) ? TRUE : FALSE;
-    out->is_volume = (raw.attr & FAT_ATTR_VOLUME) ? TRUE : FALSE;
-    out->is_hidden = (raw.attr & FAT_ATTR_HIDDEN) ? TRUE : FALSE;
-    out->is_system = (raw.attr & FAT_ATTR_SYSTEM) ? TRUE : FALSE;
-    out->is_exec = fat_is_exec_entry(&raw);
-    
-    return TRUE;
+    return fat_fill_dirent(&raw, out);
 }
 
 BOOL fs_read(const char *path, UINT8 *out, UINT32 out_cap, UINT32 *out_size) {
@@ -1583,6 +1588,14 @@ BOOL fs_read(const char *path, UINT8 *out, UINT32 out_cap, UINT32 *out_size) {
     if (!fat_resolve_path(path, &raw)) return FALSE;
     if (raw.attr & FAT_ATTR_DIRECTORY) return FALSE;
     return fat_read_file_entry(&raw, out, out_cap, out_size);
+}
+
+BOOL fs_stat(const char *path, FS_DIRENT *out_ent) {
+    FAT_DIR_RAW raw;
+    if (!fs_is_ready()) return FALSE;
+    if (!path || !out_ent) return FALSE;
+    if (!fat_resolve_path(path, &raw)) return FALSE;
+    return fat_fill_dirent(&raw, out_ent);
 }
 
 /* Stubs for write operations */
@@ -1858,6 +1871,17 @@ BOOL fs_read_in_dir(const char *dir_name, const char *name, UINT8 *out, UINT32 o
     if (!fat_find_in_dir(dir_cluster, name, &raw)) return FALSE;
     if (raw.attr & FAT_ATTR_DIRECTORY) return FALSE;
     return fat_read_file_entry(&raw, out, out_cap, out_size);
+}
+
+BOOL fs_stat_in_dir(const char *dir_name, const char *name, FS_DIRENT *out_ent) {
+    UINT32 dir_cluster;
+    FAT_DIR_RAW raw;
+
+    if (!fs_is_ready()) return FALSE;
+    if (!dir_name || !name || !out_ent) return FALSE;
+    if (!fat_resolve_dir(dir_name, &dir_cluster)) return FALSE;
+    if (!fat_find_in_dir(dir_cluster, name, &raw)) return FALSE;
+    return fat_fill_dirent(&raw, out_ent);
 }
 
 BOOL fs_is_executable(const char *path) {

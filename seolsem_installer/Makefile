@@ -8,7 +8,8 @@ QEMU_AUDIO_DRV ?= alsa
 QEMU_AUDIO_ID ?= snd0
 QEMU_AUDIO_ARGS ?= -machine pc,pcspk-audiodev=$(QEMU_AUDIO_ID) -audiodev $(QEMU_AUDIO_DRV),id=$(QEMU_AUDIO_ID)
 
-SEOLSEM_IMG ?= ../seolsem/seolsem.img
+SEOLSEM_KERNEL_IMG ?= ../seolsem/seolsem.img
+SEOLSEM_PROGRAM_IMG ?= ../seolsem/seolsem_programs.img
 
 BOOT_SRC   := bootloader/boot.asm
 MBR_SRC    := bootloader/mbr.asm
@@ -60,9 +61,10 @@ $(HDD): | $(BUILDDIR)
 	@echo "[HDD] $@"
 	$(QEMUIMG) create -f raw "$@" 256M
 
-run: $(IMG) hdd $(SEOLSEM_IMG)
+run: $(IMG) hdd $(SEOLSEM_KERNEL_IMG) $(SEOLSEM_PROGRAM_IMG)
 	@echo "When prompted to swap disks, use QEMU monitor command:"
-	@echo "  change floppy0 $(SEOLSEM_IMG)"
+	@echo "  change floppy0 $(SEOLSEM_KERNEL_IMG)     # Disk 1 (kernel)"
+	@echo "  change floppy0 $(SEOLSEM_PROGRAM_IMG)    # Disk 2 (programs)"
 	$(QEMU) $(QEMU_AUDIO_ARGS) -m 16 -boot a -monitor stdio \
 		-drive if=floppy,format=raw,file=$(IMG) \
 		-drive if=ide,format=raw,file=$(HDD)
@@ -72,5 +74,8 @@ clean:
 	@rm -rf $(BUILDDIR)
 	@rm -f $(IMG)
 
-$(SEOLSEM_IMG):
+$(SEOLSEM_KERNEL_IMG):
 	@$(MAKE) -C ../seolsem seolsem.img
+
+$(SEOLSEM_PROGRAM_IMG):
+	@$(MAKE) -C ../seolsem seolsem_programs.img

@@ -1,0 +1,90 @@
+#ifndef TUI_XH
+#define TUI_XH
+
+#include <BASE.XH>
+
+#define TUI_ROWS 25
+#define TUI_COLS 80
+
+#define TUI_ATTR_NORMAL 0x07
+#define TUI_ATTR_STATUS 0x70
+
+/* TUI helpers for Seolsem text mode apps. */
+
+void tui_clear(void) {
+  cls();
+}
+
+void tui_cursor_at(int row, int col) {
+  if (row < 0) row = 0;
+  if (row >= TUI_ROWS) row = TUI_ROWS - 1;
+  if (col < 0) col = 0;
+  if (col >= TUI_COLS) col = TUI_COLS - 1;
+  cursor_set(row, col);
+}
+
+void tui_cursor_on(void) {
+  cursor_show();
+}
+
+void tui_cursor_off(void) {
+  cursor_hide();
+}
+
+void tui_putc(int row, int col, int ch, int attr) {
+  if (row < 0 || row >= TUI_ROWS) return;
+  if (col < 0 || col >= TUI_COLS) return;
+  write_char(row, col, ch, attr);
+}
+
+void tui_fill_line(int row, int ch, int attr) {
+  int col = 0;
+  while (col < TUI_COLS) {
+    tui_putc(row, col, ch, attr);
+    col = col + 1;
+  }
+}
+
+void tui_draw_text(int row, int col, char *text, int attr) {
+  int i = 0;
+  if (!text) return;
+  while (text[i] != 0 && col < TUI_COLS) {
+    tui_putc(row, col, text[i], attr);
+    i = i + 1;
+    col = col + 1;
+  }
+}
+
+int tui_key_decode(int raw_key) {
+  int ch = raw_key & 255;
+  int scan = (raw_key >> 8) & 255;
+
+  if (ch != 0) return ch;
+
+  if (scan == 0x48) return KEY_EXT_UP;
+  if (scan == 0x50) return KEY_EXT_DOWN;
+  if (scan == 0x4B) return KEY_EXT_LEFT;
+  if (scan == 0x4D) return KEY_EXT_RIGHT;
+  return 0;
+}
+
+int tui_digit_from_key(int raw_key) {
+  int ch = raw_key & 255;
+  int scan = (raw_key >> 8) & 255;
+  if (ch >= KEY_0 && ch <= KEY_9) return ch;
+
+  if (ch != 0) return -1;
+  if (scan == 0x52) return KEY_0;
+  if (scan == 0x4F) return KEY_1;
+  if (scan == 0x50) return KEY_2;
+  if (scan == 0x51) return KEY_3;
+  if (scan == 0x4B) return KEY_4;
+  if (scan == 0x4C) return KEY_5;
+  if (scan == 0x4D) return KEY_6;
+  if (scan == 0x47) return KEY_7;
+  if (scan == 0x48) return KEY_8;
+  if (scan == 0x49) return KEY_9;
+  return -1;
+}
+
+#endif

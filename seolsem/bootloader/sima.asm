@@ -15,7 +15,7 @@ section .text
 ; - Stage2 jumps to KERNEL_BASE_SEG:ENTRY_OFF (offset is 16-bit)
 ; - Kernel switches to 16-bit protected mode with CS/DS base = image base
 ;   and segment limit = 0xFFFF.
-; If this grows beyond 64KiB, the first command execution can GP fault and hang.
+; If this grows beyond 64KiB, the first command execution can GP exception and hang.
 %if (CODE_BASE + CODE_SIZE) > 0x10000
     %error Kernel image exceeds 64KiB. Reduce size (e.g. optimize for size) or redesign segmentation.
 %endif
